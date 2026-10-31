@@ -1,5 +1,16 @@
 # Multi-Team DevOps Platform on AWS
 
+## One command
+
+```bash
+cd ~/Desktop/aws-devops/dev-finall
+make check WORKSPACE=prod
+make up WORKSPACE=prod
+make up WORKSPACE=uat
+make down WORKSPACE=prod
+make down WORKSPACE=uat
+```
+
 ## Check
 
 ```bash
@@ -95,7 +106,7 @@ make global-apply
 ```
 
 
-```
+```bash
 cd ~/Desktop/aws-devops/dev-finall/cluster
 make cluster-down WORKSPACE=prod
 # wait 1 minute so external-dns can remove the DNS records
@@ -114,4 +125,11 @@ make teams WORKSPACE=prod
 make secrets WORKSPACE=prod
 make helm-deploy WORKSPACE=prod
 
+```
+
+```bash
+cd ~/Desktop/aws-devops/dev-finall/cluster
+cp helm/env/dev.env helm/env/uat.env
+chmod 600 helm/env/uat.env
+sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 32)|; s|^JWT_REFRESH_SECRET=.*|JWT_REFRESH_SECRET=$(openssl rand -hex 32)|" helm/env/uat.env
 ```

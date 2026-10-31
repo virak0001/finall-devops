@@ -158,15 +158,20 @@ kubeconfig: ## Write ~/.kube/config-<ws> for this environment's EKS cluster
 
 # ─── Bring-up ────────────────────────────────────────────────────────────────
 
+# FORCE=1 on teams and helm-deploy: a re-run finds the Applications from the last
+# one, and those two refuse to run alongside Argo CD. Helm deploys here because
+# prod's Applications wait for a manual sync, so nothing else would start it.
 .PHONY: up
-up: ## Everything after `terraform apply`: controllers, teams, secrets, Argo CD (~10 min)
+up: ## Everything after `terraform apply`: controllers, teams, secrets, services, Argo CD (~15 min)
 	@$(MAKE) --no-print-directory platform-pull WORKSPACE=$(WORKSPACE)
 	@$(MAKE) --no-print-directory kubeconfig    WORKSPACE=$(WORKSPACE)
 	@$(MAKE) --no-print-directory controllers   WORKSPACE=$(WORKSPACE)
-	@$(MAKE) --no-print-directory teams         WORKSPACE=$(WORKSPACE)
+	@FORCE=1 $(MAKE) --no-print-directory teams WORKSPACE=$(WORKSPACE)
 	@$(MAKE) --no-print-directory secrets       WORKSPACE=$(WORKSPACE)
+	@FORCE=1 $(MAKE) --no-print-directory helm-deploy WORKSPACE=$(WORKSPACE)
 	@$(MAKE) --no-print-directory argocd-install WORKSPACE=$(WORKSPACE)
 	@$(MAKE) --no-print-directory argocd-apps   WORKSPACE=$(WORKSPACE)
+	@$(MAKE) --no-print-directory argocd-expose WORKSPACE=$(WORKSPACE)
 	@echo
 	@$(MAKE) --no-print-directory url WORKSPACE=$(WORKSPACE)
 
