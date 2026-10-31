@@ -93,3 +93,25 @@ make global-init
 make global-plan
 make global-apply
 ```
+
+
+```
+cd ~/Desktop/aws-devops/dev-finall/cluster
+make cluster-down WORKSPACE=prod
+# wait 1 minute so external-dns can remove the DNS records
+
+cd ../terraform
+make destroy WORKSPACE=prod
+make plan WORKSPACE=prod
+make apply-plan WORKSPACE=prod
+
+cd ../cluster
+make platform-pull WORKSPACE=prod
+make kubeconfig WORKSPACE=prod
+export KUBECONFIG=~/.kube/config-prod
+make controllers WORKSPACE=prod
+make teams WORKSPACE=prod
+make secrets WORKSPACE=prod
+make helm-deploy WORKSPACE=prod
+
+```
