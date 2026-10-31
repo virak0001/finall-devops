@@ -1,0 +1,29 @@
+# Plugins the platform pipelines use, and why. Dependencies resolve on their own.
+
+# Declarative pipelines, stages, input steps, `pipeline {}` from a library
+workflow-aggregator
+
+# @Library('platform') — the shared library in this repo (init.groovy.d/30)
+pipeline-groovy-lib
+
+# Multibranch jobs on GitHub: one job per repo, a build per branch and per
+# pull request, and webhook events at /github-webhook/ (init.groovy.d/40)
+git
+github
+github-branch-source
+workflow-multibranch
+cloudbees-folder
+
+# withCredentials, the credential store init.groovy.d/10 fills
+credentials
+credentials-binding
+plain-credentials
+
+# withSonarQubeEnv and waitForQualityGate
+sonar
+
+# The `timestamps()` option on every pipeline
+timestamper
+
+# The stage grid on a job's page — where a failed gate shows at a glance
+pipeline-stage-view

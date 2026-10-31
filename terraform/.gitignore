@@ -1,0 +1,16 @@
+# State records what Terraform believes exists. Lose it and Terraform forgets
+# it built anything — `destroy` can no longer clean up, and you are deleting
+# resources by hand in the console.
+#
+# Workspace states live in terraform.tfstate.d/<workspace>/, so this covers
+# every environment at once.
+.terraform/
+terraform.tfstate.d/
+*.tfstate
+*.tfstate.*
+tfplan
+secrets_import.tf
+
+# Local states that remain: bootstrap/ keeps its own here on purpose (it
+# creates the bucket the others live in), and terraform.tfstate.d/ is what
+# `make migrate-state` moves into S3 the first time. Both covered above.

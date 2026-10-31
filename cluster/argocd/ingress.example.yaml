@@ -1,0 +1,57 @@
+# Argo CD web UI — at https://argocd.<site_hostname>, on the environment's
+# shared ALB, for ADMIN_ALLOWED_CIDRS only.
+#
+# This is the template. Do not apply it directly: the hostname and the allowed
+# CIDRs are per-environment facts, and this repository is public. Render it:
+#
+#   make argocd-expose WORKSPACE=dev   # writes argocd/ingress-<ws>.yaml (gitignored) and applies it
+#
+# Placeholders: __WORKSPACE__ __HOSTNAME__ __ALB_GROUP__ __CERT_ARN__
+#               __ALLOWED_CIDRS_JSON__  (a JSON list of CIDR strings)
+#
+# A host of its own rather than a path under the site: Argo CD then serves at
+# /, with no rootpath to keep in step. The wildcard certificate Terraform
+# issued for *.<site_hostname> covers it, and external-dns publishes it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-server
+    app.kubernetes.io/part-of: argocd
+    workspace: __WORKSPACE__
+  annotations:
+    alb.ingress.kubernetes.io/group.name: __ALB_GROUP__
+    # Before every team rule, so its host match is evaluated first.
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/success-codes: "200"
+
+    # Who may reach the admin UI — an extra condition on this one rule, NOT
+    # inbound-cidrs. inbound-cidrs is a property of the load balancer, and
+    # this ALB is shared: it would lock the whole site to these addresses.
+    # A request from anywhere else matches no rule and gets the ALB's 404.
+    #
+    # The key after `conditions.` must be the backend Service's name.
+    alb.ingress.kubernetes.io/conditions.argocd-server: >
+      [{"field": "source-ip", "sourceIpConfig": {"values": __ALLOWED_CIDRS_JSON__}}]
+spec:
+  ingressClassName: alb
+  rules:
+    - host: __HOSTNAME__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80

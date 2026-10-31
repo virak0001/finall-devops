@@ -1,0 +1,178 @@
+# Jenkins, SonarQube and the database SonarQube needs.
+#
+# Copied to /opt/ci on the instance by `make deploy`, which then runs
+# `docker compose up -d` there. Editing this file and re-running deploy is the
+# whole update path — the instance is never rebuilt, because rebuilding it
+# would lose every Jenkins job and all SonarQube history.
+
+name: ci
+
+services:
+  # ─── Jenkins ───────────────────────────────────────────────────────────────
+  jenkins:
+    # jenkins/jenkins:lts-jdk21 plus the plugins in jenkins/plugins.txt.
+    build: ./jenkins
+    image: ci-jenkins:local
+    pull_policy: build
+    container_name: jenkins
+    restart: unless-stopped
+    user: root
+
+    ports:
+      - "8080:8080"
+      # Inbound agents. Not exposed in the security group — there are no
+      # remote agents, and builds run on this same host.
+      - "50000:50000"
+
+    environment:
+      # Skips the "unlock Jenkins" screen wizard being unable to reach the
+      # update centre behind a proxy, and stops it nagging about a URL it
+      # cannot guess. The initial admin password still applies.
+      JAVA_OPTS: >-
+        -Djenkins.install.runSetupWizard=true
+        -Dhudson.model.DownloadService.noSignatureCheck=true
+        -Xmx1536m
+      JENKINS_URL: "${JENKINS_URL:-http://localhost:8080}"
+
+      # Read by init.groovy.d/10-credentials.groovy, which creates the matching
+      # Jenkins credentials on every start. Unset means that credential is
+      # skipped, not created empty.
+      GIT_USERNAME: "${GIT_USERNAME:-git}"
+      GIT_TOKEN: "${GIT_TOKEN:-}"
+      GIT_CREDENTIALS_ID: "${GIT_CREDENTIALS_ID:-git-token}"
+      SONAR_TOKEN: "${SONAR_TOKEN:-}"
+      SONAR_CREDENTIALS_ID: "${SONAR_CREDENTIALS_ID:-sonar-token}"
+      SONAR_EMPLOYEE_SERVICE_TOKEN: "${SONAR_EMPLOYEE_SERVICE_TOKEN:-}"
+      SONAR_EMPLOYEE_SERVICE_CREDENTIALS_ID: "${SONAR_EMPLOYEE_SERVICE_CREDENTIALS_ID:-sonar-employee-service-token}"
+      SONAR_AUTH_SERVICE_TOKEN: "${SONAR_AUTH_SERVICE_TOKEN:-}"
+      SONAR_AUTH_SERVICE_CREDENTIALS_ID: "${SONAR_AUTH_SERVICE_CREDENTIALS_ID:-sonar-auth-service-token}"
+      SONAR_CORE_SERVICE_TOKEN: "${SONAR_CORE_SERVICE_TOKEN:-}"
+      SONAR_CORE_SERVICE_CREDENTIALS_ID: "${SONAR_CORE_SERVICE_CREDENTIALS_ID:-sonar-core-service-token}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CREDENTIALS_ID: "${TELEGRAM_CREDENTIALS_ID:-telegram-notify}"
+
+      # The GitOps repository: the pipelines commit image tags to it, so this
+      # token needs WRITE access to the cluster repo (and nothing else).
+      GITOPS_USERNAME: "${GITOPS_USERNAME:-git}"
+      GITOPS_TOKEN: "${GITOPS_TOKEN:-}"
+
+      # Argo CD's `ci` account, one token per environment — the pipelines
+      # read sync and health from it, and sync prod after an approval.
+      ARGOCD_TOKEN_DEV: "${ARGOCD_TOKEN_DEV:-}"
+      ARGOCD_TOKEN_UAT: "${ARGOCD_TOKEN_UAT:-}"
+      ARGOCD_TOKEN_PROD: "${ARGOCD_TOKEN_PROD:-}"
+
+      # Signs GitHub's webhook deliveries; scripts/github-webhooks.sh gives
+      # GitHub the same value.
+      GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET:-}"
+
+      # The platform shared library (init.groovy.d/30) and the jobs created
+      # from it (init.groovy.d/40).
+      PLATFORM_LIBRARY_REPO: "${PLATFORM_LIBRARY_REPO:-https://github.com/devops-infra-virak-ran/jenkins-sonarqube.git}"
+      PLATFORM_LIBRARY_BRANCH: "${PLATFORM_LIBRARY_BRANCH:-master}"
+
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      # Lets a pipeline run `docker build` and `docker run` using the host's
+      # daemon, instead of docker-in-docker. `user: root` above is what makes
+      # the socket readable — the jenkins user is uid 1000 and the socket is
+      # owned by root:docker, and the group id inside the container does not
+      # match the host's.
+      #
+      # This is root-equivalent access to the host. Acceptable because only
+      # you can reach this Jenkins; it would not be on a shared instance.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      # Groovy that runs at every startup, before the UI is available. Bound
+      # over a subpath of the jenkins_home volume — Docker applies the deeper
+      # mount, so the volume keeps everything else.
+      - ./jenkins/init.groovy.d:/var/jenkins_home/init.groovy.d:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  # ─── SonarQube ─────────────────────────────────────────────────────────────
+  sonarqube:
+    image: sonarqube:26.8.0.126808-community
+    container_name: sonarqube
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+    ports:
+      - "9000:9000"
+
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: "${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}"
+      # Elasticsearch and the web process each get their own heap. Left
+      # unset they size themselves from total host memory and, sharing a box
+      # with Jenkins, ask for more than exists.
+      #
+      # -Xms MUST equal -Xmx for the search process. Elasticsearch enforces it
+      # as a bootstrap check and refuses to start otherwise:
+      #
+      #   bootstrap check failure: initial heap size [130023424] not equal to
+      #   maximum heap size [1073741824]
+      #
+      # With only -Xmx set, -Xms defaults to 1/64 of host RAM — 128 MB on this
+      # box — and SonarQube restart-loops with nothing in `docker ps` saying
+      # why. The web process has no such check, so it takes -Xmx alone.
+      SONAR_WEB_JAVAOPTS: -Xmx1024m
+      SONAR_SEARCH_JAVAOPTS: -Xms1024m -Xmx1024m
+
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+
+    # vm.max_map_count is set on the host by cloud-init, not here — a container
+    # cannot raise it. If SonarQube restarts in a loop, check that first:
+    #   sysctl vm.max_map_count     should be 262144
+    ulimits:
+      nofile: { soft: 131072, hard: 131072 }
+      nproc: 8192
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/api/system/status | grep -q UP"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
+  # ─── SonarQube's database ──────────────────────────────────────────────────
+  # Required. SonarQube ships an embedded H2 database that it refuses to start
+  # against outside of evaluation, and there is no upgrade path off it.
+  db:
+    image: postgres:16-alpine
+    container_name: sonar-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: "${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}"
+      POSTGRES_DB: sonar
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    # No ports. Only SonarQube talks to it, over the compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  jenkins_home:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  postgres_data:

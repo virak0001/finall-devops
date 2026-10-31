@@ -1,0 +1,30 @@
+# This repo is public. The folders below keep their own .gitignore files; these
+# rules are the backstop, so a new secret or state file never lands in a commit.
+
+# Application and platform values
+*.env
+.env
+.env.*
+!*.env.example
+!.env.example
+
+# Terraform state and plans
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfstate.d/
+tfplan
+secrets_import.tf
+
+# Keys and credentials
+*.pem
+*.key
+kubeconfig
+*.kubeconfig
+
+# Build output
+node_modules/
+dist/
+.nuxt/
+.output/
+coverage/

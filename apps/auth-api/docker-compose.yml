@@ -1,0 +1,37 @@
+# Local run of the auth microservice against your own Postgres.
+# Provide the database as a single connection string via DATABASE_URL:
+#   DATABASE_URL=postgres://user:pass@host:5432/dbname docker compose up --build
+# Then:  http://localhost:3001/api/health  ->  {"status":"ok","service":"auth"}
+# (host port 3001 -> container 3000, to avoid clashing with the frontend dev server on 3000)
+
+services:
+  auth:
+    build:
+      context: .
+      target: production
+    image: auth:local
+    container_name: auth
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      # Database — one Postgres connection string:
+      #   postgres://USER:PASSWORD@HOST:5432/DBNAME
+      # Managed providers (RDS/Neon/Supabase/…) usually require TLS — if so also
+      # set DB_SSL=true (+ DB_SSL_REJECT_UNAUTHORIZED=true to verify the cert).
+      # For a Postgres on your own machine, use host.docker.internal as the host.
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL to your Postgres connection string}
+      DB_SSL: ${DB_SSL:-false}
+      DB_SSL_REJECT_UNAUTHORIZED: ${DB_SSL_REJECT_UNAUTHORIZED:-false}
+      DB_SYNCHRONIZE: ${DB_SYNCHRONIZE:-true} # dev convenience; use migrations in prod
+      # JWT — override with strong secrets (openssl rand -hex 32).
+      JWT_SECRET: ${JWT_SECRET:-changeme-use-strong-secret-min-32-chars}
+      JWT_ACCESS_EXPIRY: 15m
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-changeme-use-different-secret-min-32-chars}
+      JWT_REFRESH_EXPIRY: 7d
+    extra_hosts:
+      # lets the container reach a Postgres running on your host (needed on Linux)
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "3001:3000" # host 3001 -> container 3000
+    restart: unless-stopped

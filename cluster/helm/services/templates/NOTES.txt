@@ -1,0 +1,28 @@
+{{- $all := include "services.all" $ | fromYaml }}
+{{- $base := .Values.global.ingress.url | trimSuffix "/" }}
+{{ .Chart.Name }} {{ .Chart.Version }} — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+
+{{ if $base }}{{ $base }}{{ else }}No public URL set. The Makefile passes it from the platform facts (site_url):
+  make platform WORKSPACE=<env>{{ end }}
+{{- range $name, $svc := $all }}
+{{- if $svc.enabled }}
+{{- $ctx := dict "root" $ "name" $name "svc" $svc }}
+  {{ printf "%-16s" $name }} {{ include "services.image" $ctx }}
+{{- if $svc.route }}
+  {{ printf "%-16s" "" }} → {{ $base }}{{ $svc.route }}
+{{- else }}
+  {{ printf "%-16s" "" }} → internal only, at http://{{ include "services.name" $ctx }}.{{ $.Release.Namespace }}:{{ $svc.service.port }}
+{{- end }}
+{{- else }}
+  {{ printf "%-16s" $name }} disabled
+{{- end }}
+{{- end }}
+
+Check them:
+  make url         WORKSPACE=<env>    the routes above
+  make helm-status WORKSPACE=<env>    what is actually running
+  kubectl -n {{ .Release.Namespace }} get deploy,svc,ingress -l app.kubernetes.io/instance={{ .Release.Name }}
+
+A new route takes 2-3 minutes: the controller creates or updates the ALB, the
+targets pass two health checks, and external-dns publishes the record.
+`kubectl -n {{ .Release.Namespace }} describe ingress` shows the controller's events.

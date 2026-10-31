@@ -1,0 +1,23 @@
+# Real environment files hold credentials. The .example templates beside them
+# are committed, and must never contain a real one.
+helm/env/*.env
+!helm/env/*.env.example
+
+# Platform facts are NOT committed. They name a live environment — account id,
+# VPC, hostnames — and this repository is public. `make platform-pull`
+# writes platform/<ws>.env from SSM; platform/<ws>.local.env is yours alone.
+platform/*.env
+
+# Rendered by `make graph`.
+graph.svg
+
+# Rendered Argo CD manifests carry the ECR prefix (account id), the hostname
+# and the allowed addresses — not committed.
+argocd/rendered-*.yaml
+argocd/application-*.yaml
+argocd/ingress-*.yaml
+
+# Left behind by the Kubespray cluster this project used to build: an admin
+# kubeconfig and encryption credentials for a cluster that no longer exists.
+# Ignored so they cannot be committed; delete the directory when convenient.
+kubespray/

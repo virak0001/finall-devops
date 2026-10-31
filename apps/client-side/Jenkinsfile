@@ -1,0 +1,19 @@
+// The whole pipeline lives in the platform shared library
+// (jenkins-sonarqube/shared-library/vars/servicePipeline.groovy) — every
+// service runs the same one, so a fix to it reaches all of them at once.
+//
+//   any branch / PR   tests, secret + dependency + image scans, SonarQube gate
+//   develop           … then push to ECR and deploy to dev, verify
+//   testing           … deploy to uat, verify, roll back on failure
+//   main              … approval, then deploy to prod, verify, roll back on failure
+//
+// Fast-forward merges (develop → testing → main) reuse the image dev tested.
+
+@Library('platform') _
+
+servicePipeline(
+  service           : 'client-side',
+  team              : 'web-service',
+  sonarCredentialsId: 'sonar-employee-service-token',
+  smokePaths        : ['/'],
+)

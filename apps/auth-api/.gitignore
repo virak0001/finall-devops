@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.DS_Store
+.idea
+.fleet
+*.log
+
+# Environment files — never commit real secrets
+.env
+.env.local
+.env.*
+!.env.example
+actions-runner

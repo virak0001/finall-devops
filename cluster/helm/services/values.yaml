@@ -1,0 +1,192 @@
+# ─── The one file you edit ───────────────────────────────────────────────────
+#
+# This file holds only what is true for every service, everywhere. The
+# services themselves live under ../values/<group>/, and the Makefile passes
+# every one of those files with -f, plus the file for the workspace:
+#
+#     helm/values/
+#       api-service/services.yaml    auth-api, core-api
+#       web-service/services.yaml    client-side
+#     helm/env/
+#       dev.yaml uat.yaml prod.yaml    tags and replicas, per environment
+#
+# A group is a team: it deploys into the namespace of the same name, through
+# its own Argo CD Application and AppProject. Adding a service is a block
+# under `services:` in the right group file — `make svc-add` writes it. Its
+# ECR repository is Terraform's (global/, var.services). Removing one is
+# deleting that block.
+#
+# Merge order, most general to most specific:
+#
+#     defaults:                  this file — every service, any group
+#       └── groups.<g>.defaults: values/<g>/services.yaml, `defaults:`
+#             └── the service:   values/<g>/services.yaml, under `services:`
+#                   └── the env: env/<workspace>.yaml — tag and replicas
+
+# ─── Defaults for every service, in any group ────────────────────────────────
+
+defaults:
+  enabled: true
+  replicas: 2
+
+  image:
+    # No default repository on purpose: a service with no image is a mistake,
+    # and `required` in the template turns it into a clear error rather than a
+    # Deployment that pulls ":latest" from nowhere.
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  port: 3000
+
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 80
+    # nodePort:            # only meaningful when type is NodePort
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      # No CPU limit on purpose: throttling at the limit hurts tail latency
+      # more than it protects the node, and the kubelet reservations already
+      # keep the system's share safe.
+      memory: 512Mi
+
+  probes:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+
+  podSecurityContext:
+    fsGroup: 1000
+
+  # Off by default: `replicas` above is the count unless a service opts in.
+  # When enabled the Deployment stops rendering `replicas` altogether and the
+  # HPA owns it — see templates/hpa.yaml.
+  #
+  # minReplicas 2, not 1, for redundancy: at 1 the service has no spare pod, so
+  # a node failure or a crash-loop is an outage rather than a degraded moment.
+  # (Rollouts themselves are fine at 1 — maxSurge 1 adds the new pod before
+  # removing the old.) dev overrides this to 1 to save capacity; anything
+  # serving real traffic should not.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    # targetMemoryUtilizationPercentage:   # opt-in; see the note in hpa.yaml
+    behavior:
+      scaleDown:
+        # 5 minutes, against the 15-minute default. Long enough not to chase a
+        # brief dip, short enough to give the capacity back the same afternoon.
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 0
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0     # never drop below `replicas` during a rollout
+      maxSurge: 1
+
+  # Keeps one pod up while a node is drained — by Cluster Autoscaler scaling
+  # down, or a node group rolling onto a new AMI. Only rendered when there are
+  # two or more pods to keep one of; with one, it would block the drain forever.
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  # Spread replicas across availability zones, so an AZ outage costs a share
+  # of the capacity rather than the service. ScheduleAnyway: a preference, so
+  # a two-AZ dev cluster still schedules a third replica.
+  topologySpread:
+    enabled: true
+    whenUnsatisfiable: ScheduleAnyway
+
+  # ALB rule order within the group, lowest first. A route of "/" matches
+  # every path, so it must come after the specific ones — the template gives
+  # it 1000 and everything else 100 unless a service names its own.
+  # ingressOrder: 100
+
+  env: {}                   # plain values, rendered inline
+  config: {}                # values that become a ConfigMap + envFrom
+  envFrom: []               # existing Secrets/ConfigMaps, by name
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ─── Cluster-wide settings ───────────────────────────────────────────────────
+
+global:
+  # Prefixed to every image.repository that is not already fully qualified, so
+  # the registry is named once rather than in every entry.
+  #
+  # Empty here, and not set in any values file: it carries the AWS account id
+  # and this repository is public. The Makefile and the Argo CD Application
+  # pass it from the platform facts Terraform publishes to SSM:
+  #
+  #   --set global.imageRegistry=<account>.dkr.ecr.<region>.amazonaws.com/<project>
+  #
+  # Which is why `helm template helm/services -f ...` run by hand renders
+  # `auth-api:0.1.0` and the Makefile does not. Use `make helm-render`.
+  imageRegistry: ""
+
+  # None on EKS. The nodes pull from ECR with their own IAM role
+  # (AmazonEC2ContainerRegistryPullOnly), so there is no registry password to
+  # put in a Secret, and nothing to refresh every 12 hours.
+  imagePullSecrets: []
+
+  # Which groups this release renders. Empty renders every group — what
+  # `helm template` with no flags shows. Each team's Argo CD Application and
+  # `make helm-deploy` set it to the one team they deploy, because the
+  # environment file below names every team's services and a release lives in
+  # one namespace.
+  groups: []
+
+  ingress:
+    enabled: true
+
+    # The AWS Load Balancer Controller's class. Every Ingress with it becomes
+    # rules on a real ALB — no in-cluster proxy in between, and the targets are
+    # pod IPs directly.
+    className: alb
+
+    # Every Ingress naming the same group shares ONE load balancer: one ALB per
+    # environment, not one per service (~$16/month each). Rules from different
+    # namespaces merge into it, ordered by `order` below.
+    group: ""
+
+    # The hostname the rules match, and that external-dns publishes. Empty
+    # matches any Host header — the ALB's own DNS name then works, over HTTP.
+    host: ""
+
+    # HTTPS. Empty with a host set still works: the controller looks up an
+    # issued ACM certificate covering the host. Naming it is just explicit.
+    certificateArn: ""
+
+    # TLS 1.3, falling back to 1.2. The ALB default still allows 1.0 and 1.1.
+    sslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+    # Display only: never rendered into a manifest, only into NOTES.txt and
+    # `make url`.
+    url: ""
+
+# ─── Groups ──────────────────────────────────────────────────────────────────
+# Filled in from ../values/<group>/*.yaml, then ../env/<workspace>.yaml. Empty
+# here so the chart renders nothing on its own — `helm template helm/services`
+# with no -f is a valid, empty release rather than an error.
+#
+# The group name becomes app.kubernetes.io/component on every object:
+#
+#     kubectl get deploy -l app.kubernetes.io/component=api-service
+
+groups: {}

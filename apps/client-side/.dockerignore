@@ -1,0 +1,15 @@
+node_modules
+.nuxt
+.output
+.data
+.nitro
+.git
+README.md
+
+# Local development env. Nuxt reads .env at BUILD time, so without this
+# `COPY . .` bakes a developer's laptop settings into the production image as
+# runtimeConfig defaults — NUXT_PUBLIC_IS_STAGING=true would ship to prod. It
+# would also copy any credentials in there into an image layer.
+.env
+.env.*
+!.env.example

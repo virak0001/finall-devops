@@ -1,0 +1,374 @@
+name: Backend CI/CD
+
+# Branches:
+#   development  → developer testing  → auto deploy to dev Lambda
+#   testing      → UAT                → auto deploy to uat Lambda
+#   develop      → production         → requires manual approval before deploy
+
+# DISABLED. Manual-only: nothing here runs on a push any more.
+#
+# workflow_dispatch with no push trigger means this file is still valid, still
+# listed in the Actions tab, and still runnable from the "Run workflow" button
+# — but no commit starts it. That keeps the Lambda deploy logic below reviewable
+# and one edit away from working, rather than deleting it and losing it to git
+# history.
+#
+# To re-enable, delete the workflow_dispatch line and restore:
+#
+#   push:
+#     branches: [develop, testing, development]
+#     paths: ['**']
+#
+# The `if: github.ref_name == '...'` guards on each deploy job stay correct
+# either way; under manual runs they gate on whichever branch you dispatch from.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: backend-cicd-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-southeast-1
+  NODE_VERSION: '20'
+  LAMBDA_RUNTIME: nodejs20.x
+  LAMBDA_HANDLER: dist/lambda.handler
+  DEPLOY_S3_BUCKET: backend-313403752965-ap-southeast-1-an
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Test (all branches)
+  # ------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      - run: npm test -- --passWithNoTests
+
+      - run: npm run test:e2e
+
+  # ------------------------------------------------------------------
+  # 2. Build Lambda zip artifact (shared across all deploy jobs)
+  # ------------------------------------------------------------------
+  build:
+    name: Build Lambda Package
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 1: tsc via nest-cli — handles emitDecoratorMetadata for NestJS DI
+      - name: Compile TypeScript
+        run: npm run build:lambda
+
+      # Step 2: esbuild bundles compiled JS into a single file.
+      #   --keep-names: required — preserves class names for class-validator
+      #                 and TypeORM decorators (class name mangling breaks them)
+      #   --external:pg-native: optional pg binding, not installed
+      - name: Bundle with esbuild
+        run: |
+          npx --yes esbuild dist/lambda.js \
+            --bundle \
+            --platform=node \
+            --target=node20 \
+            --outfile=dist/lambda.bundle.js \
+            --external:pg-native \
+            --external:@nestjs/websockets \
+            --external:@nestjs/websockets/socket-module \
+            --external:@nestjs/microservices \
+            --external:@nestjs/microservices/microservices-module \
+            --keep-names \
+            --minify
+          mv dist/lambda.bundle.js dist/lambda.js
+
+      - name: Verify bundle
+        run: test -f dist/lambda.js
+
+      - name: Package
+        run: zip -r backend-lambda.zip dist/lambda.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-lambda
+          path: backend-lambda.zip
+          retention-days: 1
+
+  # ------------------------------------------------------------------
+  # 3a. Auto-deploy → development branch → dev Lambda
+  # ------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref_name == 'development'
+    environment: dev
+
+    steps:
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-lambda
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy to Lambda
+        env:
+          FN: ${{ secrets.DEV_LAMBDA_FUNCTION_NAME || 'devops-backend-dev' }}
+          ROLE: ${{ secrets.DEV_LAMBDA_ROLE_ARN || secrets.LAMBDA_ROLE_ARN || 'arn:aws:iam::313403752965:role/devops-lambda-execution-role' }}
+          BUCKET: ${{ env.DEPLOY_S3_BUCKET }}
+        run: |
+          fn=$(printf '%s' "${FN:-devops-backend-dev}" | tr -d '\n\r')
+          [ -z "$fn" ] && { echo "ERROR: Function name is empty"; exit 1; }
+          [ -z "$BUCKET" ] && { echo "ERROR: DEPLOY_S3_BUCKET secret is not set"; exit 1; }
+          s3_key="backend-lambda/${fn}-${GITHUB_SHA}.zip"
+          echo "→ Function: $fn"
+          echo "→ Uploading to s3://${BUCKET}/${s3_key}"
+          aws s3 cp backend-lambda.zip "s3://${BUCKET}/${s3_key}"
+          if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
+            aws lambda update-function-code --function-name "$fn" --s3-bucket "$BUCKET" --s3-key "$s3_key"
+            aws lambda wait function-updated --function-name "$fn"
+            existing=$(aws lambda get-function-configuration --function-name "$fn" --query 'Environment.Variables' --output json 2>/dev/null || echo '{}')
+            merged=$(echo "$existing" | jq -c '. + {"NODE_ENV":"production"}')
+            aws lambda update-function-configuration --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --handler "${{ env.LAMBDA_HANDLER }}" --timeout 30 --memory-size 512 --environment "{\"Variables\": $merged}"
+            aws lambda wait function-updated --function-name "$fn"
+          else
+            [ -z "$ROLE" ] && { echo "ERROR: set DEV_LAMBDA_ROLE_ARN or LAMBDA_ROLE_ARN"; exit 1; }
+            [[ "$ROLE" != *":role/"* ]] && { echo "ERROR: invalid role ARN: $ROLE"; exit 1; }
+            aws lambda create-function --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --role "$ROLE" --handler "${{ env.LAMBDA_HANDLER }}" --code "S3Bucket=${BUCKET},S3Key=${s3_key}" --timeout 30 --memory-size 512 --environment 'Variables={NODE_ENV=production}'
+            aws lambda wait function-active --function-name "$fn"
+          fi
+          version=$(aws lambda publish-version --function-name "$fn" --query 'Version' --output text)
+          if aws lambda get-alias --function-name "$fn" --name live >/dev/null 2>&1; then
+            aws lambda update-alias --function-name "$fn" --name live --function-version "$version"
+          else
+            aws lambda create-alias --function-name "$fn" --name live --function-version "$version"
+          fi
+          echo "Alias 'live' → v$version"
+
+  # ------------------------------------------------------------------
+  # 3b. Auto-deploy → testing branch → uat Lambda
+  # ------------------------------------------------------------------
+  deploy-uat:
+    name: Deploy to UAT
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref_name == 'testing'
+    environment: uat
+
+    steps:
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-lambda
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy to Lambda
+        env:
+          FN: ${{ secrets.UAT_LAMBDA_FUNCTION_NAME || 'devops-backend-uat' }}
+          ROLE: ${{ secrets.UAT_LAMBDA_ROLE_ARN || secrets.LAMBDA_ROLE_ARN || 'arn:aws:iam::313403752965:role/devops-lambda-execution-role' }}
+          BUCKET: ${{ env.DEPLOY_S3_BUCKET }}
+        run: |
+          fn=$(printf '%s' "${FN:-devops-backend-uat}" | tr -d '\n\r')
+          [ -z "$fn" ] && { echo "ERROR: Function name is empty"; exit 1; }
+          [ -z "$BUCKET" ] && { echo "ERROR: DEPLOY_S3_BUCKET secret is not set"; exit 1; }
+          s3_key="backend-lambda/${fn}-${GITHUB_SHA}.zip"
+          echo "→ Function: $fn"
+          echo "→ Uploading to s3://${BUCKET}/${s3_key}"
+          aws s3 cp backend-lambda.zip "s3://${BUCKET}/${s3_key}"
+          if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
+            aws lambda update-function-code --function-name "$fn" --s3-bucket "$BUCKET" --s3-key "$s3_key"
+            aws lambda wait function-updated --function-name "$fn"
+            existing=$(aws lambda get-function-configuration --function-name "$fn" --query 'Environment.Variables' --output json 2>/dev/null || echo '{}')
+            merged=$(echo "$existing" | jq -c '. + {"NODE_ENV":"uat"}')
+            aws lambda update-function-configuration --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --handler "${{ env.LAMBDA_HANDLER }}" --timeout 30 --memory-size 512 --environment "{\"Variables\": $merged}"
+            aws lambda wait function-updated --function-name "$fn"
+          else
+            [ -z "$ROLE" ] && { echo "ERROR: set UAT_LAMBDA_ROLE_ARN or LAMBDA_ROLE_ARN"; exit 1; }
+            [[ "$ROLE" != *":role/"* ]] && { echo "ERROR: invalid role ARN: $ROLE"; exit 1; }
+            aws lambda create-function --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --role "$ROLE" --handler "${{ env.LAMBDA_HANDLER }}" --code "S3Bucket=${BUCKET},S3Key=${s3_key}" --timeout 30 --memory-size 512 --environment 'Variables={NODE_ENV=uat}'
+            aws lambda wait function-active --function-name "$fn"
+          fi
+          version=$(aws lambda publish-version --function-name "$fn" --query 'Version' --output text)
+          if aws lambda get-alias --function-name "$fn" --name live >/dev/null 2>&1; then
+            aws lambda update-alias --function-name "$fn" --name live --function-version "$version"
+          else
+            aws lambda create-alias --function-name "$fn" --name live --function-version "$version"
+          fi
+          echo "Alias 'live' → v$version"
+
+      - name: Provision API Gateway (HTTP API)
+        env:
+          FN: ${{ secrets.UAT_LAMBDA_FUNCTION_NAME || 'devops-backend-uat' }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID || '313403752965' }}
+        run: |
+          fn=$(printf '%s' "${FN:-devops-backend-uat}" | tr -d '\n\r')
+          api_name="${fn}-api"
+          region="${{ env.AWS_REGION }}"
+
+          # Get Lambda ARN
+          lambda_arn=$(aws lambda get-function --function-name "$fn" --query 'Configuration.FunctionArn' --output text)
+          echo "→ Lambda ARN: $lambda_arn"
+
+          # Check if API already exists
+          api_id=$(aws apigatewayv2 get-apis --query "Items[?Name=='${api_name}'].ApiId" --output text 2>/dev/null | tr -d '\n\r')
+
+          if [ -z "$api_id" ] || [ "$api_id" = "None" ]; then
+            echo "→ Creating HTTP API: $api_name"
+            api_id=$(aws apigatewayv2 create-api \
+              --name "$api_name" \
+              --protocol-type HTTP \
+              --query 'ApiId' --output text)
+            echo "→ Created API: $api_id"
+          else
+            echo "→ API already exists: $api_id"
+          fi
+
+          # Create/get Lambda integration
+          integration_id=$(aws apigatewayv2 get-integrations --api-id "$api_id" \
+            --query "Items[?IntegrationUri=='${lambda_arn}'].IntegrationId" --output text 2>/dev/null | tr -d '\n\r')
+
+          if [ -z "$integration_id" ] || [ "$integration_id" = "None" ]; then
+            echo "→ Creating Lambda integration"
+            integration_id=$(aws apigatewayv2 create-integration \
+              --api-id "$api_id" \
+              --integration-type AWS_PROXY \
+              --integration-uri "$lambda_arn" \
+              --payload-format-version "2.0" \
+              --query 'IntegrationId' --output text)
+          fi
+          echo "→ Integration ID: $integration_id"
+
+          # Create catch-all route if missing
+          route_exists=$(aws apigatewayv2 get-routes --api-id "$api_id" \
+            --query "Items[?RouteKey=='ANY /{proxy+}'].RouteId" --output text 2>/dev/null | tr -d '\n\r')
+
+          if [ -z "$route_exists" ] || [ "$route_exists" = "None" ]; then
+            echo "→ Creating route ANY /{proxy+}"
+            aws apigatewayv2 create-route \
+              --api-id "$api_id" \
+              --route-key 'ANY /{proxy+}' \
+              --target "integrations/${integration_id}" >/dev/null
+          fi
+
+          # Auto-deploy stage
+          stage_exists=$(aws apigatewayv2 get-stages --api-id "$api_id" \
+            --query "Items[?StageName=='\$default'].StageName" --output text 2>/dev/null | tr -d '\n\r')
+
+          if [ -z "$stage_exists" ] || [ "$stage_exists" = "None" ]; then
+            echo "→ Creating \$default stage with auto-deploy"
+            aws apigatewayv2 create-stage \
+              --api-id "$api_id" \
+              --stage-name '$default' \
+              --auto-deploy >/dev/null
+          fi
+
+          # Grant API Gateway permission to invoke Lambda
+          aws lambda add-permission \
+            --function-name "$fn" \
+            --statement-id "apigw-${api_id}" \
+            --action lambda:InvokeFunction \
+            --principal apigateway.amazonaws.com \
+            --source-arn "arn:aws:execute-api:${region}:${ACCOUNT_ID}:${api_id}/*/*/{proxy+}" \
+            2>/dev/null || echo "→ Permission already exists"
+
+          invoke_url="https://${api_id}.execute-api.${region}.amazonaws.com"
+          echo "Invoke URL: $invoke_url"
+          echo "Health check: ${invoke_url}/api/health"
+
+  # ------------------------------------------------------------------
+  # 3c. Manual approval required → develop branch → production Lambda
+  # ------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref_name == 'develop'
+    environment: production
+
+    steps:
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-lambda
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy to Lambda
+        env:
+          FN: ${{ secrets.PROD_LAMBDA_FUNCTION_NAME || 'devops-backend' }}
+          ROLE: ${{ secrets.PROD_LAMBDA_ROLE_ARN || secrets.LAMBDA_ROLE_ARN || 'arn:aws:iam::313403752965:role/devops-lambda-execution-role' }}
+          BUCKET: ${{ env.DEPLOY_S3_BUCKET }}
+        run: |
+          fn=$(printf '%s' "${FN:-devops-backend}" | tr -d '\n\r')
+          [ -z "$fn" ] && { echo "ERROR: Function name is empty"; exit 1; }
+          [ -z "$BUCKET" ] && { echo "ERROR: DEPLOY_S3_BUCKET secret is not set"; exit 1; }
+          s3_key="backend-lambda/${fn}-${GITHUB_SHA}.zip"
+          echo "→ Function: $fn"
+          echo "→ Uploading to s3://${BUCKET}/${s3_key}"
+          aws s3 cp backend-lambda.zip "s3://${BUCKET}/${s3_key}"
+          if aws lambda get-function --function-name "$fn" >/dev/null 2>&1; then
+            aws lambda update-function-code --function-name "$fn" --s3-bucket "$BUCKET" --s3-key "$s3_key"
+            aws lambda wait function-updated --function-name "$fn"
+            existing=$(aws lambda get-function-configuration --function-name "$fn" --query 'Environment.Variables' --output json 2>/dev/null || echo '{}')
+            merged=$(echo "$existing" | jq -c '. + {"NODE_ENV":"production"}')
+            aws lambda update-function-configuration --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --handler "${{ env.LAMBDA_HANDLER }}" --timeout 30 --memory-size 512 --environment "{\"Variables\": $merged}"
+            aws lambda wait function-updated --function-name "$fn"
+          else
+            [ -z "$ROLE" ] && { echo "ERROR: set PROD_LAMBDA_ROLE_ARN or LAMBDA_ROLE_ARN"; exit 1; }
+            [[ "$ROLE" != *":role/"* ]] && { echo "ERROR: invalid role ARN: $ROLE"; exit 1; }
+            aws lambda create-function --function-name "$fn" --runtime "${{ env.LAMBDA_RUNTIME }}" --role "$ROLE" --handler "${{ env.LAMBDA_HANDLER }}" --code "S3Bucket=${BUCKET},S3Key=${s3_key}" --timeout 30 --memory-size 512 --environment 'Variables={NODE_ENV=production}'
+            aws lambda wait function-active --function-name "$fn"
+          fi
+          version=$(aws lambda publish-version --function-name "$fn" --query 'Version' --output text)
+          if aws lambda get-alias --function-name "$fn" --name live >/dev/null 2>&1; then
+            aws lambda update-alias --function-name "$fn" --name live --function-version "$version"
+          else
+            aws lambda create-alias --function-name "$fn" --name live --function-version "$version"
+          fi
+          echo "Alias 'live' → v$version"

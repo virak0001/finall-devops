@@ -1,0 +1,44 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - set -euo pipefail
+      - echo "Installing auth dependencies"
+  pre_build:
+    commands:
+      - set -euo pipefail
+      - |
+        for var in AWS_REGION ECR_REPOSITORY ENV_NAME IMAGE_TAG; do
+          if [[ -z "${!var:-}" ]]; then
+            echo "Missing required environment variable: ${var}"
+            exit 1
+          fi
+        done
+      - npm ci
+      - npm run build
+      - npm test -- --passWithNoTests
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+  build:
+    commands:
+      - set -euo pipefail
+      - IMAGE_IMMUTABLE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+      - IMAGE_LATEST="${REGISTRY}/${ECR_REPOSITORY}:${ENV_NAME}-latest"
+      - docker build -t "$IMAGE_IMMUTABLE" -t "$IMAGE_LATEST" .
+  post_build:
+    commands:
+      - set -euo pipefail
+      - docker push "$IMAGE_IMMUTABLE"
+      - docker push "$IMAGE_LATEST"
+      - printf '{"image":"%s"}\n' "$IMAGE_IMMUTABLE" > imageDetail.json
+
+artifacts:
+  files:
+    - imageDetail.json
