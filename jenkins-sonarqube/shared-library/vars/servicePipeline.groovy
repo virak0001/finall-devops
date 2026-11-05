@@ -270,28 +270,19 @@ def call(Map cfg) {
 
       // ── Deploy ─────────────────────────────────────────────────────────────
 
-      stage('Approve prod') {
-        when { environment name: 'DEPLOY_ENV', value: 'prod' }
-        steps {
-          script {
-            notifyTelegram('WAITING FOR APPROVAL', '⏳', "${cfg.service} ${env.IMAGE_TAG} → prod\nby ${env.INITIATOR}")
-            timeout(time: 60, unit: 'MINUTES') {
-              // The approver's user id comes back, and is who the prod
-              // release is recorded against.
-              env.APPROVER = input(message: "Deploy ${cfg.service} ${env.IMAGE_TAG} to PRODUCTION?",
-                                   ok: 'Deploy to prod', submitter: approvers,
-                                   submitterParameter: 'APPROVER')
-            }
-            env.DEPLOY_AUTHOR = "${env.APPROVER} <${env.APPROVER}@jenkins.local>"
-            env.INITIATOR = "${env.APPROVER} (approved; pushed by ${env.INITIATOR})"
-          }
-        }
-      }
-
       stage('Deploy') {
         when { environment name: 'IS_DEPLOY', value: 'true' }
         steps {
           script {
+            // prod waits here for prodApprovers; the approver becomes who the
+            // release is recorded against. Inside Deploy, not a stage of its
+            // own, so dev and uat builds show no skipped approval stage.
+            if (env.DEPLOY_ENV == 'prod') {
+              approveProd(message: "Deploy ${cfg.service} ${env.IMAGE_TAG} to PRODUCTION?",
+                          ok: 'Deploy to prod', submitters: approvers,
+                          notice: "${cfg.service} ${env.IMAGE_TAG} → prod", requestedBy: 'pushed')
+            }
+
             // dev keeps a failed release in place, so it can be looked at;
             // uat and prod put the previous version back by themselves.
             deploy(environment: env.DEPLOY_ENV, service: cfg.service, team: cfg.team, tag: env.IMAGE_TAG,

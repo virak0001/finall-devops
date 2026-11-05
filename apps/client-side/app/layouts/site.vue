@@ -26,7 +26,7 @@
             <div
                 class="mx-auto flex w-full max-w-3xl flex-col items-center justify-between gap-4 px-4 py-8 sm:flex-row sm:px-6">
                 <p class="text-xs text-dimmed">
-                    DevOps Learning Hub &bull; &copy; {{ new Date().getFullYear() }} &bull; Delivered by Jenkins + Argo CD
+                    DevOps Learning Hub &bull; &copy; {{ new Date().getFullYear() }} &bull; Built by Jenkins, scanned by Trivy + SonarQube, delivered by Argo CD
                 </p>
                 <div class="flex items-center gap-4">
                     <ULink v-for="s in socialLinks" :key="s.label" :to="s.to" target="_blank" :aria-label="s.label"

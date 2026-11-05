@@ -75,7 +75,7 @@
         <!-- Latest articles -->
         <section class="pb-24">
             <h2 class="text-xl font-semibold tracking-tight text-highlighted">Latest articles</h2>
-            <p class="mt-1 text-sm text-muted">Recent writing from the hub</p>
+            <p class="mt-1 text-sm text-muted">Recent writing from the hub, newest first</p>
 
             <div v-if="pending" class="mt-10 space-y-10">
                 <div v-for="n in 3" :key="n" class="space-y-3">

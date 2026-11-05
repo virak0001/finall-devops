@@ -1,7 +1,7 @@
 // Who started this build, for the deployment record.
 //
 //   a person clicking Build       → their Jenkins user id
-//   a GitHub push (webhook)       → "Name <email> (git push)", the commit's author
+//   a GitHub push (webhook)       → "Name (git push)", the commit's author
 //   anything else (timer, replay) → the cause Jenkins gives
 //
 // Also sets env.DEPLOY_AUTHOR ("Name <email>"), which the GitOps commit uses
@@ -20,12 +20,17 @@ String call() {
   // what happened, not who did it. The commit's author is the who. Matched
   // case-insensitively: Jenkins capitalises "Push", which a plain contains()
   // missed, and every push was recorded as the event text.
+  //
+  // The name alone is what is shown — build description, Telegram, image
+  // label, deployment record. The email goes only into DEPLOY_AUTHOR, the
+  // git author of the GitOps commit, where git requires one.
   if (causes.any { "${it._class ?: ''} ${it.shortDescription ?: ''}".toLowerCase().contains('push') }) {
     String author = sh(script: 'git log -1 --format="%an <%ae>" 2>/dev/null || true', returnStdout: true).trim()
     if (author) {
       env.DEPLOY_AUTHOR = author
     }
-    return "${author ?: 'unknown'} (git push)"
+    String name = author.replaceFirst(/\s*<[^>]*>\s*$/, '').trim()
+    return "${name ?: 'unknown'} (git push)"
   }
   return causes ? causes[0].shortDescription : 'unknown'
 }

@@ -95,36 +95,19 @@ def call(Map cfg) {
         }
       }
 
-      stage('Approve') {
-        when {
-          allOf {
-            expression { params.TARGET == 'prod' }
-            environment name: 'NOTHING_TO_DO', value: 'false'
-          }
-        }
-        steps {
-          script {
-            notifyTelegram('WAITING FOR APPROVAL', '⏳',
-              "${params.ACTION} ${params.SERVICE} in prod: ${env.CURRENT_TAG} → ${env.RELEASE_TAG}\nasked by ${env.INITIATOR}")
-            timeout(time: 60, unit: 'MINUTES') {
-              // submitterParameter: the approver's user id comes back, and is
-              // who the release is recorded against.
-              env.APPROVER = input(
-                message: "${params.ACTION} ${params.SERVICE} in PRODUCTION: ${env.CURRENT_TAG} → ${env.RELEASE_TAG}?",
-                ok: 'Release to prod',
-                submitter: approvers,
-                submitterParameter: 'APPROVER')
-            }
-            env.DEPLOY_AUTHOR = "${env.APPROVER} <${env.APPROVER}@jenkins.local>"
-            env.INITIATOR = "${env.APPROVER} (approved; asked by ${env.INITIATOR})"
-          }
-        }
-      }
-
       stage('Deploy') {
         when { environment name: 'NOTHING_TO_DO', value: 'false' }
         steps {
           script {
+            // prod waits here for prodApprovers — inside Deploy, so dev and
+            // uat releases show no skipped approval stage.
+            if (params.TARGET == 'prod') {
+              approveProd(message: "${params.ACTION} ${params.SERVICE} in PRODUCTION: ${env.CURRENT_TAG} → ${env.RELEASE_TAG}?",
+                          ok: 'Release to prod', submitters: approvers,
+                          notice: "${params.ACTION} ${params.SERVICE} in prod: ${env.CURRENT_TAG} → ${env.RELEASE_TAG}",
+                          requestedBy: 'asked')
+            }
+
             def svc = cfg.services[params.SERVICE]
             deploy(environment: params.TARGET, service: params.SERVICE, team: svc.team,
                    tag: env.RELEASE_TAG, smokePaths: svc.smokePaths ?: [],

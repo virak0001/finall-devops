@@ -20,6 +20,14 @@ def call(Map d) {
   def record = [environment: d.environment, service: d.service, team: d.team, tag: d.tag,
                 action: d.action ?: 'deploy', initiator: d.initiator, source: d.source]
 
+  // Everything verify() needs is checked BEFORE the GitOps commit. A missing
+  // Argo CD token used to surface only inside verify(): the new tag was
+  // already committed to the cluster repo, and the error escaped before the
+  // rollback below could put the old one back.
+  requireCredential(platform.argocdTokenId(d.environment),
+    "ARGOCD_TOKEN_${d.environment.toUpperCase()} in jenkins-sonarqube/docker/.env " +
+    "(cluster/: make argocd-ci-token WORKSPACE=${d.environment}), then make deploy")
+
   def r = gitops.setTag(environment: d.environment, service: d.service, tag: d.tag,
                         action: record.action, initiator: d.initiator, source: d.source,
                         reason: d.reason)
@@ -51,6 +59,23 @@ def call(Map d) {
   recordDeployment(record + [status: 'ROLLED_BACK', gitopsCommit: rb.commit,
                              detail: "${problem}; ${r.previousTag} restored"])
   error("${d.service} ${d.tag} failed in ${d.environment} (${problem}). ${r.previousTag} is running again.")
+}
+
+// Fails the build, having changed nothing, when Jenkins has no credential `id`.
+// Jenkins creates credentials at boot only from variables that are set
+// (init.groovy.d/10-credentials.groovy), so an empty one is simply absent.
+void requireCredential(String id, String howToFix) {
+  boolean found = true
+  try {
+    withCredentials([string(credentialsId: id, variable: 'REQUIRED_CREDENTIAL')]) { }
+  } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException aborted) {
+    throw aborted
+  } catch (Exception missing) {
+    found = false
+  }
+  if (!found) {
+    error("Jenkins has no credential '${id}' — nothing was deployed, the cluster repo is untouched. Set ${howToFix}.")
+  }
 }
 
 // Returns null when the release is healthy, otherwise what went wrong.

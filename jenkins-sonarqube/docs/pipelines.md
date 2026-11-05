@@ -17,8 +17,8 @@ multibranch job auth-api / core-api / client-side
                   report CRITICAL → LOW, ✗ = blocks; archived trivy-*.txt/.json
    ── develop / testing / main only ──────────────────────────────────────────
    Push           ECR, immutable tag (skipped if this commit is already there)
-   Approve prod   main only — prodApprovers
-   Deploy         commit tag → Argo CD Synced+Healthy → image check → smoke test
+   Deploy         main only: waits for prodApprovers first (no separate stage)
+                  commit tag → Argo CD Synced+Healthy → image check → smoke test
                   develop → dev · testing → uat (auto-rollback) · main → prod (auto-rollback)
 
 release job (Build with Parameters: SERVICE, TARGET, ACTION)
