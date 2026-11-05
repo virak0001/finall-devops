@@ -1,0 +1,176 @@
+Create a professional, multi-page draw.io diagram of the AWS DevOps platform described below.
+
+OUTPUT RULES
+- Return one complete, valid draw.io file: <mxfile> with 3 <diagram> pages. Output XML only, in one code block, with nothing omitted.
+- Use the AWS 2024 style: mxgraph.aws4 group containers and resource icons. If you are not sure a stencil name exists, use a labelled rounded rectangle in the AWS category colour. Never guess a stencil name.
+- Category colours: compute/containers #ED7100, networking #8C4FFF, storage #7AA116, security #DD344C, management/integration #E7157B.
+- Containers: AWS Cloud (group_aws_cloud_alt), Region (group_region), VPC (group_vpc2), public subnet (group_public_subnet), private subnet (group_private_subnet), Availability Zone as a dashed blue rectangle.
+- Children must be nested inside their containers using the parent attribute, so a container moves with its contents.
+- Use orthogonal edges with rounded corners. Avoid crossing lines, and never run a line through an icon or label.
+- Number the main flow arrows and give every arrow a short label.
+- Lay out left to right. Leave at least 40px between items. Each page gets a title and a small legend.
+- Line styles: solid blue = user traffic, solid orange = CI/CD, dashed purple = control/management, dashed red = secrets/IAM, dashed grey = logs/metrics.
+- Do not invent components. Draw only what is listed here.
+
+PROJECT
+Name: Multi-Team DevOps Platform on AWS. Region: us-east-1. Infrastructure as code: Terraform.
+Three identical environments: dev, uat, prod. Each has its own VPC and its own EKS cluster (Kubernetes 1.36). Two teams: api-service (backend) and web-service (frontend).
+
+━━━ PAGE 1: "AWS Infrastructure" (draw prod in full) ━━━
+
+Outside AWS:
+- End users (browser)
+- Admin/DevOps laptop (IP allowlisted)
+- GitHub (3 service repos, the GitOps "cluster" repo)
+- Neon Postgres (external managed database)
+- Telegram (notifications)
+
+Inside AWS Cloud > Region us-east-1:
+
+Box "Shared across all environments":
+- S3: Terraform state bucket
+- ECR: 3 repositories (auth-api, core-api, client-side), immutable tags
+- CloudWatch Logs: /upskill-devops/deployments
+- CloudWatch Alarm: deployment-failed
+- SNS: alerts topic, then email
+- Route 53: public hosted zone devops-selft-learning.xyz
+
+Box "Per environment":
+- ACM certificate (site + wildcard)
+- Secrets Manager: one secret per team
+- SSM Parameter Store: /platform/<env>/*, the Terraform-to-cluster handover
+- KMS key: encrypts Kubernetes Secrets
+- IAM pod identity roles
+
+VPC "CI" 10.20.0.0/16, us-east-1a, one public subnet:
+- EC2 m7i-flex.large with Elastic IP
+- Docker containers on it: Jenkins :8080, SonarQube :9000, Postgres 16
+- Security group: allowlisted admin IPs on 22/8080/9000, GitHub webhook ranges on 8080 only
+- No NAT and no load balancer
+
+VPC "prod" 10.0.0.0/16, 3 Availability Zones (1a, 1b, 1c):
+- Internet Gateway
+- Public subnets 10.0.1.0/24, 10.0.2.0/24, 10.0.3.0/24: one NAT Gateway in each; the shared internet-facing ALB spans all three
+- Private subnets 10.0.11.0/24, 10.0.12.0/24, 10.0.13.0/24: EKS worker nodes
+- Managed node group: c7i-flex.large, AL2023, min 1 / desired 2 / max 4, encrypted gp3 50 GB, IMDSv2
+- S3 Gateway Endpoint: ECR layer pulls bypass NAT
+- VPC Flow Logs (REJECT traffic) to CloudWatch
+- EKS control plane: draw as AWS-managed. Public API endpoint restricted to allowlisted IPs, private endpoint also on
+
+Numbered flow:
+1. User resolves the hostname in Route 53
+2. Route 53 alias to ALB :443 (:80 redirects to 443; TLS from ACM)
+3. ALB sends traffic directly to pod IPs in the private subnets (target-type ip, no NodePort)
+4. Pods reach Neon Postgres through NAT, then the Internet Gateway
+
+ALB listener rules, shown as a note beside the ALB, evaluated in this order:
+- order 10: argocd.<host> to Argo CD (allowlisted source IPs only)
+- order 100: <host>/api/auth to auth-api
+- order 1000: <host>/ to client-side
+
+Table on the page, "Environment differences":
+| | dev | uat | prod |
+| Hostname | dev.devops-selft-learning.xyz | uat.devops-selft-learning.xyz | devops-selft-learning.xyz |
+| AZs | 2 | 2 | 3 |
+| NAT | 1 shared | 1 shared | 1 per AZ |
+| Nodes | c7i-flex.large 1/2/4 | m7i-flex.large 2/2/4 | c7i-flex.large 1/2/4 |
+| Pod replicas | 1-3 | 2-4 | 3-6 (core-api 3-8) |
+| Flow logs | off | off | on |
+| Container Insights | off | off | on |
+| Log retention | 7 days | 14 days | 90 days |
+| Argo CD sync | automatic | automatic | manual, by Jenkins after approval |
+
+━━━ PAGE 2: "CI/CD Pipeline" ━━━
+
+Branch model: develop to dev, testing to uat, main to prod.
+
+Top lane, one box per stage:
+Developer git push > GitHub > signed webhook > Jenkins multibranch job (auth-api / core-api / client-side, shared library "platform")
+
+Stages, marking the gates with a red "fails the build" badge:
+1. Prepare: version tag from git describe
+2. Secret scan: Gitleaks [gate]
+3. Unit tests: npm ci + test:cov [gate]
+4. Dependency scan: Trivy fs, fixable CRITICAL [gate]
+5. SonarQube analysis, then Quality gate [gate]
+6. Build image: docker build with revision, version, built-by and build-url labels
+7. Image scan: Trivy image, fixable CRITICAL [gate]
+
+Draw a dashed divider labelled "develop / testing / main only", then:
+8. Push to ECR: immutable tag, skipped if this commit already exists
+9. Approve prod: main only, a manual approval diamond
+10. Deploy, as a sub-flow:
+    a. Jenkins commits the new tag to helm/env/<env>.yaml in the cluster repo, with who/what/when as git trailers
+    b. Argo CD pulls the repo. dev and uat auto-sync; for prod, Jenkins triggers the sync
+    c. Jenkins waits for Synced + Healthy, then checks the running image
+    d. Smoke test through the public URL
+    e. Decision: pass or fail
+
+Outcomes:
+- Pass: record SUCCEEDED
+- Fail on uat or prod: automatic rollback by committing the previous tag
+- Fail on dev: the release stays in place for inspection
+- Every result goes to the CloudWatch deployments log and Telegram
+- Failure statuses trigger a metric filter, then the alarm, then SNS email
+
+Second, smaller lane, "release job" (manual, Build with Parameters: SERVICE, TARGET, ACTION = promote or rollback):
+Promote copies the tag dev > uat > prod with no rebuild. The tag must exist in ECR, and prod needs approval. It then joins the same Deploy sub-flow.
+
+Callout: "Build once, promote the same image. A fast-forward merge keeps the same commit and the same tag."
+
+Environment promotion strip across the bottom:
+helm/env/dev.yaml > helm/env/uat.yaml > helm/env/prod.yaml, each going to its own cluster.
+
+━━━ PAGE 3: "Inside One EKS Cluster" ━━━
+
+Draw the cluster as a large box with one sub-box per namespace.
+
+kube-system:
+- aws-load-balancer-controller, cluster-autoscaler, metrics-server, CoreDNS, kube-proxy, VPC CNI (network policy enforcement on), EBS CSI driver, EKS Pod Identity agent
+
+external-dns:
+- external-dns
+
+external-secrets:
+- External Secrets Operator
+
+argocd:
+- Argo CD server
+- Applications: teams-<env>, api-service-<env>, web-service-<env>
+- AppProjects: platform, plus one per team
+
+amazon-cloudwatch (label "prod only"):
+- CloudWatch agent, Fluent Bit
+
+api-service (team namespace):
+- auth-api: Deployment, Service apps-auth-api, HPA 70% CPU, PDB, public at /api/auth
+- core-api: Deployment, Service apps-core-api, HPA 70% CPU, PDB, internal only, no Ingress
+
+web-service (team namespace):
+- client-side (Nuxt SSR): Deployment, Service, HPA 70% CPU, PDB, public at /
+
+Guardrails badge on each team namespace:
+ResourceQuota, LimitRange, RoleBinding (group team:<name>), NetworkPolicy, SecretStore + ExternalSecret, Pod Security baseline, ALB readiness gates
+
+Flows:
+- ALB to auth-api, client-side and Argo CD
+- client-side to auth-api and core-api: server-side rendering over cluster DNS, allowed by NetworkPolicy allowFrom
+- core-api to auth-api: AUTH_SERVICE_URL
+- auth-api and core-api to Neon Postgres, through NAT
+- aws-load-balancer-controller watches Ingresses, then creates and updates the ALB
+- external-dns watches Ingresses, then writes the Route 53 record
+- cluster-autoscaler resizes the node group Auto Scaling group when pods are Pending
+- metrics-server feeds the HPAs
+- Argo CD pulls the GitOps repo and applies the Helm charts helm/services and helm/teams
+
+Secrets flow, in dashed red:
+helm/env/<env>.env > make secret-push > Secrets Manager <project>/<env>/<team> > External Secrets assumes the <cluster>-secrets-<team> IAM role > Secret app-env in the team namespace > pods via envFrom
+Callout: "One IAM role per team: a team cannot read another team's secret."
+
+Pod Identity note listing each service account and what it may do:
+- aws-load-balancer-controller: create and change ALBs
+- cluster-autoscaler: resize this cluster's node group
+- external-dns: write records in the one hosted zone
+- external-secrets: assume the per-team secret roles only
+
+Before returning the file, check the XML is well formed, every edge has a valid source and target, all ids are unique, and no text overflows its shape.

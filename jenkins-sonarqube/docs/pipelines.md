@@ -11,10 +11,10 @@ multibranch job auth-api / core-api / client-side
    Prepare        version tag = git describe (3.0.6-2-g73bf736), who started it
    Secret scan    Gitleaks                                   ── fails the build
    Unit tests     npm ci + test:cov                          ── fails the build
-   Dependency     Trivy fs — fixable CRITICAL                ── fails the build
    SonarQube      analysis + quality gate                    ── fails the build
    Build          docker build, labels: revision, version, built-by, build-url
-   Image scan     Trivy image — fixable CRITICAL             ── fails the build
+   Security scan  Trivy fs + image — fixable CRITICAL        ── fails the build
+                  report CRITICAL → LOW, ✗ = blocks; archived trivy-*.txt/.json
    ── develop / testing / main only ──────────────────────────────────────────
    Push           ECR, immutable tag (skipped if this commit is already there)
    Approve prod   main only — prodApprovers

@@ -7,8 +7,8 @@
 //
 // Every branch and pull request — CI, nothing leaves Jenkins:
 //
-//   checkout → secret scan → unit tests → dependency scan → SonarQube +
-//   quality gate → build → image scan
+//   checkout → secret scan → unit tests → SonarQube + quality gate → build →
+//   security scan (dependencies + image)
 //
 // The three environment branches, additionally — deploy:
 //
@@ -141,19 +141,6 @@ def call(Map cfg) {
         }
       }
 
-      stage('Dependency scan') {
-        steps {
-          // Every HIGH and CRITICAL is listed; only `gate` severities with a
-          // fix available fail the build. A finding with no fix cannot be
-          // acted on, so it must not block every release. Accepted risks go
-          // in .trivyignore, one CVE per line, with a comment saying why.
-          runTool('trivy', 'fs --scanners vuln --skip-dirs node_modules --severity HIGH,CRITICAL --exit-code 0 --no-progress .',
-               dockerArgs: '-v trivy-cache:/root/.cache/trivy')
-          runTool('trivy', "fs --scanners vuln --skip-dirs node_modules --severity ${gate} --ignore-unfixed --exit-code 1 --no-progress .",
-               dockerArgs: '-v trivy-cache:/root/.cache/trivy')
-        }
-      }
-
       stage('SonarQube') {
         steps {
           // withSonarQubeEnv records the analysis task id that the quality
@@ -199,16 +186,68 @@ def call(Map cfg) {
         }
       }
 
-      stage('Image scan') {
-        when { environment name: 'ALREADY_BUILT', value: 'false' }
+      stage('Security scan') {
         steps {
-          // The base image and OS packages — what the dependency scan cannot
-          // see. Same rule: fixable `gate` findings fail, everything is listed.
-          runTool('trivy', 'image --severity HIGH,CRITICAL --exit-code 0 --no-progress "$IMAGE"',
-               dockerArgs: '-v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy')
-          runTool('trivy', "image --severity ${gate} --ignore-unfixed --exit-code 1 --no-progress \"\$IMAGE\"",
-               dockerArgs: '-v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/trivy')
+          script {
+            // Trivy, twice over the same rule:
+            //   dependencies  the repo's lockfiles, dev dependencies included
+            //   image         base image and OS packages, which the lockfile
+            //                 cannot see — only when this build made the image
+            //
+            // Each target is scanned ONCE, every severity, to JSON. The report
+            // is rendered from that JSON by resources/platform/trivy-report.tpl:
+            // worst first (CRITICAL → HIGH → MEDIUM → LOW), with ✗ on each
+            // finding that blocks. It is printed and archived as
+            // trivy-<target>.txt, beside the raw trivy-<target>.json.
+            //
+            // A finding blocks when its severity is in `gate` AND a fix
+            // exists. One with no fix cannot be acted on, so it must not block
+            // every release. Accepted risks go in .trivyignore, one CVE per
+            // line, with a comment saying why — the scan drops them before
+            // the report, so they neither show nor block.
+            //
+            // Both targets are reported before the stage fails, so one red
+            // build shows everything to fix. A scanner that could not run (no
+            // DB, no image) fails as broken, never as clean.
+            writeFile file: '.platform/trivy-report.tpl',
+                      text: libraryResource('platform/trivy-report.tpl').replace('__GATE__', trivyList(gate))
+
+            String cache = '-v trivy-cache:/root/.cache/trivy'
+            List scans = [[name: 'dependencies', args: 'fs --scanners vuln --skip-dirs node_modules .',
+                           docker: cache]]
+            if (env.ALREADY_BUILT == 'false') {
+              scans << [name: 'image', args: 'image "$IMAGE"',
+                        docker: "-v /var/run/docker.sock:/var/run/docker.sock ${cache}"]
+            }
+
+            List blocked = []
+            String dbUpdate = ''   // the first scan refreshes the DB; the next reuses it
+            for (Map s : scans) {
+              int rc = runTool('trivy',
+                "${s.args} ${dbUpdate} --format json --output trivy-${s.name}.json --exit-code 0 --no-progress",
+                returnStatus: true, dockerArgs: s.docker)
+              if (rc != 0) { error("Trivy ${s.name} scan failed to run (exit ${rc}) — a broken scan, not a clean one.") }
+              dbUpdate = '--skip-db-update'
+
+              rc = runTool('trivy',
+                "convert --format template --template @.platform/trivy-report.tpl --output trivy-${s.name}.txt trivy-${s.name}.json",
+                returnStatus: true)
+              if (rc != 0) { error("Trivy ${s.name} report failed to render (exit ${rc}).") }
+
+              String report = readFile("trivy-${s.name}.txt")
+              echo "══ Security scan: ${s.name} — blocks on fixable ${gate} ══\n${report}"
+              int blocking = blockingCount(report)
+              if (blocking < 0) { error("Trivy ${s.name} report has no 'blocking:' line — the template is broken.") }
+              if (blocking > 0) { blocked << "${s.name} (${blocking})" }
+            }
+
+            if (blocked) {
+              error("Fixable ${gate} vulnerabilities in: ${blocked.join(', ')} — marked ✗ in the report above. " +
+                    'Upgrade the package or base image, or accept the risk in .trivyignore with a comment saying why.')
+            }
+          }
         }
+        post { always { archiveArtifacts artifacts: 'trivy-*.txt, trivy-*.json', allowEmptyArchive: true } }
       }
 
       stage('Push to ECR') {
@@ -296,11 +335,25 @@ def call(Map cfg) {
         sh '''
           docker rmi "$IMAGE" 2>/dev/null || true
           docker image prune -f >/dev/null 2>&1 || true
-          rm -rf node_modules coverage .scannerwork .platform .gitops
+          rm -rf node_modules coverage .scannerwork .platform .gitops trivy-*.json trivy-*.txt
         '''
       }
     }
   }
+}
+
+// "CRITICAL,HIGH" → "CRITICAL" "HIGH", a list literal for the report template.
+// @NonCPS: plain string work, and closures inside CPS code are fragile.
+@NonCPS
+String trivyList(String severities) {
+  return severities.split(',').collect { "\"${it.trim().toUpperCase()}\"" }.join(' ')
+}
+
+// The template's last line is "blocking: N". -1 when it is missing.
+@NonCPS
+int blockingCount(String report) {
+  def m = report =~ /(?m)^blocking: (\d+)\s*$/
+  return m.find() ? (m.group(1) as int) : -1
 }
 
 // The aws CLI as a shell command, for use inside a larger `sh` — piping into

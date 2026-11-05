@@ -71,14 +71,16 @@ fi
 
 # Each NAT gateway needs an address, and addresses this environment already
 # holds are not new ones. ServiceManaged leaves out the ALB's, which are listed
-# here but do not count against the quota.
+# here but do not count against the quota. Project as well as Environment: the
+# CI server's address is also tagged dev, and does not belong to this cluster.
 if [[ "$(value single_nat_gateway)" == "true" ]]; then
   need=1
 else
   need="$(value availability_zones | tr -cd ',' | wc -c)"; need=$((need + 1))
 fi
+project="$(value project_name | tr -d '"')"
 held="$(aws ec2 describe-addresses --region "${REGION}" \
-  --query "length(Addresses[?!ServiceManaged && Tags[?Key=='Environment' && Value=='${WORKSPACE}']])" --output text 2>/dev/null || echo 0)"
+  --query "length(Addresses[?!ServiceManaged && Tags[?Key=='Environment' && Value=='${WORKSPACE}'] && Tags[?Key=='Project' && Value=='${project}']])" --output text 2>/dev/null || echo 0)"
 used="$(aws ec2 describe-addresses --region "${REGION}" \
   --query 'length(Addresses[?!ServiceManaged])' --output text 2>/dev/null || echo 0)"
 limit="$(aws service-quotas get-service-quota --region "${REGION}" --service-code ec2 --quota-code L-0263D0A3 \

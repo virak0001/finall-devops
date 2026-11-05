@@ -26,7 +26,7 @@ availability_zone = "us-east-1a"
 # A stale entry does not error: the security group drops the packets, so the
 # browser hangs rather than refusing. 0.0.0.0/0 is rejected by a validation.
 
-ssh_allowed_cidrs = ["117.20.115.144/32"]
+ssh_allowed_cidrs = ["203.147.140.229/32"]
 
 ssh_public_key_path  = "~/.ssh/id_ed25519.pub"
 ssh_private_key_path = "~/.ssh/id_ed25519"
