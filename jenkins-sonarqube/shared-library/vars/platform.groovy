@@ -24,6 +24,15 @@ def cfg() {
     clusterBranch: 'main',
     gitopsCredentialsId: 'github-cluster-repo',
 
+    // Each service's repository — the promote job reads release tags from
+    // here. Mirrors docker/jenkins/init.groovy.d/40-github.groovy.
+    serviceRepos : [
+      'auth-api'   : 'github.com/virak-01/aws-auth.git',
+      'core-api'   : 'github.com/virak-01/api-ops.git',
+      'client-side': 'github.com/virak-01/frontend.git',
+    ],
+    serviceRepoCredentialsId: 'git-token',
+
     // dev ← every build of main. uat and prod ← the promote job only.
     environments : ['dev', 'uat', 'prod'],
     hosts        : [

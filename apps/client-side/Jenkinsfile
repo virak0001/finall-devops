@@ -3,9 +3,12 @@
 // service runs the same one, so a fix to it reaches all of them at once.
 //
 //   any branch / PR   tests, secret + dependency + image scans, SonarQube gate
-//   develop           … then push to ECR and deploy to dev, verify
-//   testing           … deploy to uat, verify, roll back on failure
-//   main              … approval, then deploy to prod, verify, roll back on failure
+//   develop           … build dev-<sha>, push to ECR, deploy to dev, verify
+//   testing           … name the same image uat-<sha>, deploy to uat, verify,
+//                       roll back on failure
+//   main              … name it prod-vX.Y.Z (the commit must be tagged) — ECR
+//                       only, no deploy. Release to prod with the `release`
+//                       job: approval, verify, roll back on failure.
 //
 // Fast-forward merges (develop → testing → main) reuse the image dev tested.
 

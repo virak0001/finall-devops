@@ -52,50 +52,54 @@ resource "aws_ecr_repository" "this" {
 }
 
 # ─── Lifecycle policy ────────────────────────────────────────────────────────
-# Rules are evaluated in priority order and an image matches only the first
-# rule it hits, so the "untagged" rule must come before the catch-all.
+# Rules are evaluated in priority order, and an image matched by one rule can
+# never be expired by a lower-priority rule. So keep_by_tag_prefix is ordered
+# most precious first: an image named dev-5a87e72 AND prod-v1.0.8 is matched by
+# the prod- rule, and the dev- rule cannot touch it. The catch-all must come
+# last — ECR requires tagStatus "any" to have the highest priority number.
+
+locals {
+  lifecycle_rules = concat(
+    [{
+      rulePriority = 1
+      description  = "Expire untagged images after ${var.untagged_expiry_days} days"
+      selection = {
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = var.untagged_expiry_days
+      }
+      action = { type = "expire" }
+    }],
+    [for i, k in var.keep_by_tag_prefix : {
+      rulePriority = i + 2
+      description  = "Keep the last ${k.keep} images named ${k.prefix}*"
+      selection = {
+        tagStatus     = "tagged"
+        tagPrefixList = [k.prefix]
+        countType     = "imageCountMoreThan"
+        countNumber   = k.keep
+      }
+      action = { type = "expire" }
+    }],
+    [{
+      rulePriority = length(var.keep_by_tag_prefix) + 2
+      description  = "Keep the last ${var.keep_any_images} images of any other tag"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = var.keep_any_images
+      }
+      action = { type = "expire" }
+    }],
+  )
+}
 
 resource "aws_ecr_lifecycle_policy" "this" {
   for_each = aws_ecr_repository.this
 
   repository = each.value.name
-
-  policy = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Expire untagged images after ${var.untagged_expiry_days} days"
-        selection = {
-          tagStatus   = "untagged"
-          countType   = "sinceImagePushed"
-          countUnit   = "days"
-          countNumber = var.untagged_expiry_days
-        }
-        action = { type = "expire" }
-      },
-      {
-        rulePriority = 2
-        description  = "Keep the last ${var.keep_release_images} release images"
-        selection = {
-          tagStatus     = "tagged"
-          tagPrefixList = var.release_tag_prefixes
-          countType     = "imageCountMoreThan"
-          countNumber   = var.keep_release_images
-        }
-        action = { type = "expire" }
-      },
-      {
-        rulePriority = 3
-        description  = "Keep the last ${var.keep_any_images} images of any other tag"
-        selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = var.keep_any_images
-        }
-        action = { type = "expire" }
-      },
-    ]
-  })
+  policy     = jsonencode({ rules = local.lifecycle_rules })
 }
 
 # ─── Repository policy ───────────────────────────────────────────────────────

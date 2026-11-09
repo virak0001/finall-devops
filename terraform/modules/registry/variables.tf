@@ -42,16 +42,18 @@ variable "untagged_expiry_days" {
   default     = 7
 }
 
-variable "release_tag_prefixes" {
-  type        = list(string)
-  description = "Tag prefixes treated as releases and kept longer"
-  default     = ["v", "release"]
-}
+variable "keep_by_tag_prefix" {
+  type = list(object({
+    prefix = string
+    keep   = number
+  }))
+  description = "Images kept per tag prefix, most precious first — an image matched by an earlier entry is never expired by a later one"
+  default     = []
 
-variable "keep_release_images" {
-  type        = number
-  description = "Number of release-tagged images to keep"
-  default     = 30
+  validation {
+    condition     = alltrue([for k in var.keep_by_tag_prefix : k.prefix != "" && k.keep >= 1])
+    error_message = "Each entry needs a non-empty prefix and keep >= 1."
+  }
 }
 
 variable "keep_any_images" {

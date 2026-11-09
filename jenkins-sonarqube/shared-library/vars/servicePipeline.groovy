@@ -10,21 +10,26 @@
 //   checkout → secret scan → unit tests → SonarQube + quality gate → build →
 //   security scan (dependencies + image)
 //
-// The three environment branches, additionally — deploy:
+// The three environment branches, additionally — publish, and deploy:
 //
 //   develop → dev    push to ECR → commit the tag → Argo CD → smoke test → record
 //   testing → uat    the same, and rolls back by itself if the checks fail
-//   main    → prod   the same, after an approval (prodApprovers)
+//   main    → prod   push to ECR ONLY — Deploy is skipped. A person releases it
+//                    with the `release` job (TARGET=prod), which asks for the
+//                    approval. See manualDeploy below.
 //
-// The image is keyed by the commit, not the branch. Merging develop → testing →
-// main by fast-forward moves the SAME commit, whose image is already in ECR, so
-// uat and prod run exactly the image dev tested — it is not rebuilt. A merge
-// commit is a new commit, and gets a new image.
+// Image names (vars/imageTag.groovy) — one image per commit, a name per
+// environment it reaches:
 //
-// Image tag: `git describe` of the commit — "3.0.6-2-g73bf736" is two commits
-// after release v3.0.6, at 73bf736. Versioned, unique per commit, and ECR's
-// immutable tags guarantee it only ever names one image. A rebuild of a
-// commit already in ECR skips straight to the deploy.
+//   develop → dev-5a87e72    built here, pushed to ECR
+//   testing → uat-5a87e72    the SAME image: the name is added, nothing built
+//   main    → prod-v1.0.8    the SAME image, named after the commit's release
+//                            tag — main publishes only a commit tagged vX.Y.Z
+//
+// Merging develop → testing → main by fast-forward moves the SAME commit, so
+// uat and prod run exactly the image dev tested. A merge commit is a new
+// commit with no image yet: it is built fresh, and the build log says so.
+// A rebuild of a commit that already has its name skips straight to deploy.
 //
 // Options:
 //   service            ECR repository and Helm service name (required)
@@ -33,6 +38,9 @@
 //   smokePaths         public paths that must answer 2xx/3xx after a deploy
 //   branches           branch → environment; default
 //                      [develop: 'dev', testing: 'uat', main: 'prod']
+//   manualDeploy       environments whose branch only publishes the image and
+//                      skips Deploy; default ['prod']. [] makes main deploy
+//                      too, after an approval from prodApprovers.
 //   prodApprovers      Jenkins user ids who may approve prod (default 'admin')
 //   securityGate       severities that fail the build: 'CRITICAL' (default)
 //                      or 'HIGH,CRITICAL'. Unfixed findings never fail it.
@@ -43,6 +51,7 @@ def call(Map cfg) {
   }
   Map branches = cfg.branches ?: [develop: 'dev', testing: 'uat', main: 'prod']
   String approvers = cfg.prodApprovers ?: 'admin'
+  List manual = cfg.manualDeploy != null ? cfg.manualDeploy : ['prod']
   String gate = cfg.securityGate ?: 'CRITICAL'
   List smokePaths = cfg.smokePaths ?: []
 
@@ -67,29 +76,75 @@ def call(Map cfg) {
         steps {
           script {
             env.DEPLOY_ENV = env.CHANGE_ID ? '' : (branches[env.BRANCH_NAME] ?: '')
-            env.IS_DEPLOY = env.DEPLOY_ENV ? 'true' : 'false'
+            env.IS_DEPLOY = env.DEPLOY_ENV ? 'true' : 'false'   // publishes to ECR
+            env.AUTO_DEPLOY = env.DEPLOY_ENV && !(env.DEPLOY_ENV in manual) ? 'true' : 'false'
             env.INITIATOR = initiator()
             env.SHORT_SHA = env.GIT_COMMIT.take(7)
 
-            // Releases are tags vMAJOR.MINOR.PATCH on the repository. Before
-            // the first one, versions count from 0.0.0.
+            // The version: `git describe` against the vMAJOR.MINOR.PATCH
+            // release tags — 1.0.7-14-g5a87e72 is 14 commits after v1.0.7.
+            // SonarQube and the image's label carry it; the image NAME is
+            // per environment (below). Before the first release, 0.0.0.
+            String gitEnv = "-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'"
             String described = runTool('git',
               "describe --tags --long --match 'v[0-9]*.[0-9]*.[0-9]*' HEAD 2>/dev/null || true",
-              returnStdout: true,
-              dockerArgs: "-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'")
-            String version = described ? described.replaceFirst(/^v/, '') : "0.0.0-0-g${env.SHORT_SHA}"
+              returnStdout: true, dockerArgs: gitEnv)
+            env.VERSION = described ? described.replaceFirst(/^v/, '') : "0.0.0-0-g${env.SHORT_SHA}"
+
+            // prod images are releases only: the commit on main must carry a
+            // vX.Y.Z tag, which names the prod image. Checked first, so a
+            // missing tag costs seconds, not a full build.
+            String release = ''
+            if (env.DEPLOY_ENV == 'prod') {
+              release = runTool('git',
+                "describe --tags --exact-match --match 'v[0-9]*.[0-9]*.[0-9]*' HEAD 2>/dev/null || true",
+                returnStdout: true, dockerArgs: gitEnv)
+              if (!imageTag.isRelease(release)) {
+                error("main publishes prod images only from a release, and ${env.SHORT_SHA} has no vX.Y.Z tag. " +
+                      "Tag it, then run this build again:\n" +
+                      "    git tag v1.2.3 ${env.SHORT_SHA} && git push origin v1.2.3")
+              }
+            }
 
             // Branch and PR builds never reach ECR; their tag only has to be
             // unique on this node.
-            env.IMAGE_TAG = env.IS_DEPLOY == 'true' ? version : "ci-${env.BUILD_TAG}".replaceAll(/[^A-Za-z0-9_.-]/, '-').take(120)
+            env.IMAGE_TAG = env.IS_DEPLOY == 'true'
+              ? imageTag.forEnv(env.DEPLOY_ENV, env.GIT_COMMIT, release ?: null)
+              : "ci-${env.BUILD_TAG}".replaceAll(/[^A-Za-z0-9_.-]/, '-').take(120)
             env.IMAGE = platform.image(cfg.service, env.IMAGE_TAG)
 
+            // Is there an image already? Either under this environment's
+            // name (a rebuild), or under an earlier environment's name for
+            // this same commit — then it is only named, never rebuilt.
+            //   ALREADY_BUILT  skip the build and the image scan
+            //   REUSE_FROM     the existing name to add IMAGE_TAG to
             env.ALREADY_BUILT = 'false'
+            env.REUSE_FROM = ''
             if (env.IS_DEPLOY == 'true') {
-              int found = runTool('awsCli',
-                "ecr describe-images --repository-name '${platform.repository(cfg.service)}' --image-ids imageTag='${env.IMAGE_TAG}'",
-                returnStatus: true, dockerArgs: '--entrypoint aws')
-              env.ALREADY_BUILT = found == 0 ? 'true' : 'false'
+              def mine = imageTag.find(cfg.service, env.IMAGE_TAG)
+              if (mine) {
+                String other = imageTag.otherCommit(mine, env.SHORT_SHA)
+                if (other) {
+                  error("${env.IMAGE_TAG} is already the image of commit ${other}, not ${env.SHORT_SHA}. " +
+                        'A release names one image forever — tag this commit with a new version.')
+                }
+                env.ALREADY_BUILT = 'true'
+              } else {
+                // uat before dev for prod: the image uat accepted. The last
+                // is this commit's name from before the dev-/uat- scheme.
+                List earlier = []
+                for (String e : ([prod: ['uat', 'dev'], uat: ['dev']][env.DEPLOY_ENV] ?: [])) {
+                  earlier << imageTag.forEnv(e, env.GIT_COMMIT, null)
+                }
+                earlier << env.VERSION
+                for (String t : earlier) {
+                  if (t != env.IMAGE_TAG && imageTag.find(cfg.service, t)) {
+                    env.REUSE_FROM = t
+                    env.ALREADY_BUILT = 'true'
+                    break
+                  }
+                }
+              }
             }
 
             currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.IMAGE_TAG}"
@@ -100,7 +155,9 @@ def call(Map cfg) {
               commit     : ${env.GIT_COMMIT}
               image      : ${env.IMAGE}
               started by : ${env.INITIATOR}
-              deploys    : ${env.IS_DEPLOY == 'true' ? "yes — to ${env.DEPLOY_ENV}" : 'no (CI only)'}${env.ALREADY_BUILT == 'true' ? ' — image already in ECR, not rebuilt' : ''}
+              version    : ${env.VERSION}
+              deploys    : ${env.AUTO_DEPLOY == 'true' ? "yes — to ${env.DEPLOY_ENV}" : env.IS_DEPLOY == 'true' ? "no — pushed to ECR only; release it to ${env.DEPLOY_ENV} with the release job" : 'no (CI only)'}
+              image from : ${env.IS_DEPLOY != 'true' ? 'this build (not pushed)' : env.REUSE_FROM ? "${env.REUSE_FROM} in ECR — the same image gets the name ${env.IMAGE_TAG}, nothing is rebuilt" : env.ALREADY_BUILT == 'true' ? 'already in ECR under this name — not rebuilt' : 'this build'}
             """.stripIndent()
           }
         }
@@ -152,7 +209,7 @@ def call(Map cfg) {
             withCredentials([string(credentialsId: cfg.sonarCredentialsId, variable: 'SONAR_TOKEN')]) {
               runTool('sonar',
                 '-Dsonar.projectBaseDir="$WORKSPACE" -Dsonar.working.directory="$WORKSPACE/.scannerwork" ' +
-                '-Dsonar.projectVersion="$IMAGE_TAG"',
+                '-Dsonar.projectVersion="$VERSION"',
                 dockerArgs: '--network ci_default --user root -e SONAR_HOST_URL -e SONAR_TOKEN')
             }
           }
@@ -177,7 +234,7 @@ def call(Map cfg) {
           sh '''
             docker build \
               --label org.opencontainers.image.revision="$GIT_COMMIT" \
-              --label org.opencontainers.image.version="$IMAGE_TAG" \
+              --label org.opencontainers.image.version="$VERSION" \
               --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               --label io.upskill.built-by="$INITIATOR" \
               --label io.upskill.build-url="$BUILD_URL" \
@@ -250,37 +307,33 @@ def call(Map cfg) {
         post { always { archiveArtifacts artifacts: 'trivy-*.txt, trivy-*.json', allowEmptyArchive: true } }
       }
 
-      stage('Push to ECR') {
+      // A new image is pushed; an existing one only gains its name for this
+      // environment. On main this is where the build ends: prod-vX.Y.Z is in
+      // ECR, ready for the release job.
+      stage('Publish image') {
         when {
           allOf {
             environment name: 'IS_DEPLOY', value: 'true'
-            environment name: 'ALREADY_BUILT', value: 'false'
+            expression { env.ALREADY_BUILT == 'false' || env.REUSE_FROM }
           }
         }
-        steps {
-          // The repository already exists — Terraform's (global/). The
-          // instance profile may push to upskill-devops/* and create nothing.
-          sh """
-            ${awsCmd()} ecr get-login-password | docker login --username AWS --password-stdin '${platform.registry()}'
-            docker push "\$IMAGE"
-            docker logout '${platform.registry()}'
-          """
-        }
+        steps { script { publishImage(cfg.service) } }
       }
 
       // ── Deploy ─────────────────────────────────────────────────────────────
 
+      // Skipped for manualDeploy environments (prod, by default).
       stage('Deploy') {
-        when { environment name: 'IS_DEPLOY', value: 'true' }
+        when { environment name: 'AUTO_DEPLOY', value: 'true' }
         steps {
           script {
-            // prod waits here for prodApprovers; the approver becomes who the
-            // release is recorded against. Inside Deploy, not a stage of its
-            // own, so dev and uat builds show no skipped approval stage.
+            // Only when prod is NOT in manualDeploy: prod then waits here for
+            // prodApprovers, and the approver is who the release is recorded
+            // against. Inside Deploy, so dev and uat show no skipped stage.
             if (env.DEPLOY_ENV == 'prod') {
-              approveProd(message: "Deploy ${cfg.service} ${env.IMAGE_TAG} to PRODUCTION?",
+              approveProd(message: "Deploy ${cfg.service} ${env.IMAGE_TAG} to PRODUCTION? (${imageOrigin()})",
                           ok: 'Deploy to prod', submitters: approvers,
-                          notice: "${cfg.service} ${env.IMAGE_TAG} → prod", requestedBy: 'pushed')
+                          notice: "${cfg.service} ${env.IMAGE_TAG} → prod (${imageOrigin()})", requestedBy: 'pushed')
             }
 
             // dev keeps a failed release in place, so it can be looked at;
@@ -299,7 +352,9 @@ def call(Map cfg) {
       success {
         script {
           notifyTelegram('SUCCESS', '✅', "${cfg.service} ${env.IMAGE_TAG ?: ''}" +
-            (env.IS_DEPLOY == 'true' ? " → ${env.DEPLOY_ENV}" : ' (CI)') + "\nby ${env.INITIATOR ?: 'unknown'}")
+            (env.AUTO_DEPLOY == 'true' ? " → ${env.DEPLOY_ENV}"
+             : env.IS_DEPLOY == 'true' ? " in ECR — release to ${env.DEPLOY_ENV} with the release job (${imageOrigin()})"
+             : ' (CI)') + "\nby ${env.INITIATOR ?: 'unknown'}")
         }
       }
       failure {
@@ -345,6 +400,29 @@ String trivyList(String severities) {
 int blockingCount(String report) {
   def m = report =~ /(?m)^blocking: (\d+)\s*$/
   return m.find() ? (m.group(1) as int) : -1
+}
+
+// Where IMAGE_TAG's image came from — said wherever a person decides on prod.
+String imageOrigin() {
+  return env.REUSE_FROM ? "same image as ${env.REUSE_FROM}, not rebuilt"
+       : env.ALREADY_BUILT == 'true' ? 'already in ECR under this name'
+       : 'BUILT FRESH — this image never ran in dev or uat'
+}
+
+// Puts IMAGE_TAG in ECR: names the existing image REUSE_FROM, or pushes the
+// image this build made. The repository already exists — Terraform's
+// (global/); the instance profile may push to upskill-devops/* and create
+// nothing.
+void publishImage(String service) {
+  if (env.REUSE_FROM) {
+    imageTag.add(service, env.REUSE_FROM, env.IMAGE_TAG)
+    return
+  }
+  sh """
+    ${awsCmd()} ecr get-login-password | docker login --username AWS --password-stdin '${platform.registry()}'
+    docker push "\$IMAGE"
+    docker logout '${platform.registry()}'
+  """
 }
 
 // The aws CLI as a shell command, for use inside a larger `sh` — piping into

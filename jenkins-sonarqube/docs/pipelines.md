@@ -8,7 +8,8 @@ git push (any branch / PR)
    │  GitHub webhook → http://<jenkins>:8080/github-webhook/   (signed, SG-limited)
    ▼
 multibranch job auth-api / core-api / client-side
-   Prepare        version tag = git describe (3.0.6-2-g73bf736), who started it
+   Prepare        image name per environment (below), version = git describe, who started it
+                  main: the commit must carry a vX.Y.Z tag     ── fails the build
    Secret scan    Gitleaks                                   ── fails the build
    Unit tests     npm ci + test:cov                          ── fails the build
    SonarQube      analysis + quality gate                    ── fails the build
@@ -16,18 +17,48 @@ multibranch job auth-api / core-api / client-side
    Security scan  Trivy fs + image — fixable CRITICAL        ── fails the build
                   report CRITICAL → LOW, ✗ = blocks; archived trivy-*.txt/.json
    ── develop / testing / main only ──────────────────────────────────────────
-   Push           ECR, immutable tag (skipped if this commit is already there)
-   Deploy         main only: waits for prodApprovers first (no separate stage)
+   Publish        new image → push · same commit's image already in ECR → add a name, no rebuild
+   Deploy         develop and testing only — main stops after Publish
                   commit tag → Argo CD Synced+Healthy → image check → smoke test
-                  develop → dev · testing → uat (auto-rollback) · main → prod (auto-rollback)
+                  develop → dev · testing → uat (auto-rollback)
+
+release job (Build with Parameters: SERVICE, TARGET=prod) — the ONLY way into prod
+   approval by prodApprovers → commit tag → Argo CD sync → checks → auto-rollback
 
 release job (Build with Parameters: SERVICE, TARGET, ACTION)
    promote or roll back one service by hand, outside a merge
 ```
 
-The image tag is the commit (`git describe`). A fast-forward merge
+## Image names
+
+One image per commit, built once. Each environment it reaches adds a name —
+the image is never rebuilt for one (`shared-library/vars/imageTag.groovy`):
+
+| Branch → env | Name | How |
+| --- | --- | --- |
+| develop → dev | `dev-5a87e72` | built and pushed (the commit, 7 characters) |
+| testing → uat | `uat-5a87e72` | the same image, name added |
+| main → prod | `prod-v1.0.8` | the same image, named after the commit's git tag — **pushed only, not deployed** |
+
+**prod is manual.** A main build ends with `prod-v1.0.8` in ECR. Release it
+with the `release` job: `SERVICE`, `TARGET=prod`, `ACTION=promote` (takes what
+uat runs) or `TAG=prod-v1.0.8` — then approve. `manualDeploy: []` in a
+Jenkinsfile would make main deploy by itself, after an approval.
+
+All names of one image share one digest. A fast-forward merge
 develop → testing → main moves the same commit, so uat and prod reuse the
-image dev ran — not rebuilt. A merge commit is a new commit and a new image.
+image dev ran. A merge commit is a new commit: it is built fresh, and prod's
+approval prompt says so. The `release` job adds names the same way.
+
+```bash
+# which image does uat run, and what else is it called?
+aws ecr describe-images --repository-name upskill-devops/client-side \
+  --query 'imageDetails[?imageTags && contains(join(`,`, imageTags), `uat-`)].[imagePushedAt, join(`, `, imageTags)]' \
+  --output table
+```
+
+`imagePushedAt` is the first push, not when a name was added — for what an
+environment runs *now*, read `helm/env/<env>.yaml` in the cluster repo.
 
 ## Who did what
 
@@ -64,6 +95,9 @@ git -C ../cluster log --format='%h %ad %(trailers:key=Initiated-By,valueonly,sep
 
 ## Gotchas
 
+- **prod needs a release tag.** main fails in Prepare until the commit has
+  one: `git tag v1.2.3 <sha> && git push origin v1.2.3`, then Build Now on
+  main. A tag cannot be re-released on another commit — use a new version.
 - **`git describe` needs tags** in the checkout; the jobs fetch them. A repo
   with no `v*.*.*` tag versions from `0.0.0-<n>-g<sha>`.
 - **A gate that fails on old CVEs** — accept a specific one with a line in

@@ -12,6 +12,7 @@ export class HealthController {
 
       return {
         status: 'ok',
+        service: 'core-api',
         database: 'up',
         timestamp: new Date().toISOString(),
       };

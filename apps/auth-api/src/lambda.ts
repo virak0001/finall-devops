@@ -30,9 +30,7 @@ export const handler: Handler = async (
 ) => {
   context.callbackWaitsForEmptyEventLoop = false;
 
-  if (!cachedServer) {
-    cachedServer = await bootstrap();
-  }
+  cachedServer ??= await bootstrap();
 
   return cachedServer(event, context, callback);
 };

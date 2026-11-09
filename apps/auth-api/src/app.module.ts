@@ -12,7 +12,9 @@ const isTrue = (value?: string): boolean =>
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: [".env.local", ".env"],
+      // /run/secrets/auth_env is the swarm secret (see docker-swarm/secrets/);
+      // absent outside the swarm, where the local .env files apply instead.
+      envFilePath: ["/run/secrets/auth_env", ".env.local", ".env"],
     }),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],

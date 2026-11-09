@@ -64,6 +64,8 @@ export class HealthController {
   // not routed to this service at all.
   @Get("api/auth/health")
   publicHealth() {
-    return { status: "ok", service: "auth" };
+    // Uptime shows a rollout from outside: it drops to seconds when new pods
+    // take over. Nothing else about the process is exposed.
+    return { status: "ok", service: "auth", uptimeSeconds: Math.round(process.uptime()) };
   }
 }

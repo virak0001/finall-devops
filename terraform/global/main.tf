@@ -5,8 +5,9 @@
 #
 # One registry, not one per environment, because a release is a promotion:
 # the image Jenkins built and dev ran is the exact image uat accepts and prod
-# runs — same digest, retagged never. Tags are IMMUTABLE (modules/registry),
-# so "v1.4.2" can only ever mean one image.
+# runs — same digest, never rebuilt; each environment only adds its own name
+# (dev-5a87e72, uat-5a87e72, prod-v1.4.2). Tags are IMMUTABLE
+# (modules/registry), so a name can only ever mean one image.
 #
 # No workspace here. This root has one state, at global/terraform.tfstate in
 # the state bucket.
@@ -73,9 +74,16 @@ module "registry" {
   # rebuilt.
   pull_principal_arns = []
 
-  # Image tags are `git describe` output (3.0.6-2-g73bf736), so every image
-  # falls under the "any other tag" rule. 50 per service is the rollback
-  # window — a few cents of storage.
+  # One image, a name per environment it reached: dev-5a87e72, then
+  # uat-5a87e72, then prod-v1.0.8 (jenkins-sonarqube/shared-library/vars/
+  # imageTag.groovy). prod- comes first, so an image prod ever ran is kept by
+  # the prod- rule however many newer dev builds there are. The catch-all keeps
+  # tags from before this scheme (1.0.7-14-g5a87e72, prod.v3.0.5).
+  keep_by_tag_prefix = [
+    { prefix = "prod-", keep = 100 },
+    { prefix = "uat-", keep = 30 },
+    { prefix = "dev-", keep = 30 },
+  ]
   keep_any_images = 50
 
   tags = var.tags

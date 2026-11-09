@@ -43,12 +43,12 @@ FROM node:${NODE_VERSION} AS production
 WORKDIR /app
 
 LABEL org.opencontainers.image.title="auth" \
-      org.opencontainers.image.description="Auth microservice (NestJS + TypeORM)" \
-      org.opencontainers.image.source="https://github.com/virak0001/aws-auth"
+  org.opencontainers.image.description="Auth microservice (NestJS + TypeORM)" \
+  org.opencontainers.image.source="https://github.com/virak0001/aws-auth"
 
 ENV NODE_ENV=production \
-    HOST=0.0.0.0 \
-    PORT=3000
+  HOST=0.0.0.0 \
+  PORT=3000
 
 RUN apk add --no-cache tini
 
