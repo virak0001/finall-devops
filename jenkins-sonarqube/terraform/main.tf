@@ -11,7 +11,12 @@
 # open to the internet, only to the addresses in ssh_allowed_cidrs.
 
 terraform {
-  required_version = ">= 1.9.0"
+  required_version = ">= 1.10.0" # S3-native state locking (use_lockfile)
+
+  # State lives in the platform's state bucket, not on one laptop, so anyone
+  # on the team can plan and apply. Bucket, key and locking come from
+  # backend.hcl — `make init` passes it.
+  backend "s3" {}
 
   required_providers {
     aws = {

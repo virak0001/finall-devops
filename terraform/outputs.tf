@@ -113,3 +113,18 @@ output "environment" {
   description = "Which environment this state holds — always the workspace name"
   value       = local.environment
 }
+
+output "waf_acl_arn" {
+  description = "WAF web ACL for this environment's ALB, or null with waf_enabled = false"
+  value       = var.waf_enabled ? module.waf[0].web_acl_arn : null
+}
+
+output "dashboard_name" {
+  description = "CloudWatch dashboard for this environment (CloudWatch → Dashboards)"
+  value       = var.enable_monitoring ? module.monitoring[0].dashboard_name : null
+}
+
+output "alb_logs_bucket" {
+  description = "S3 bucket with the ALB's access logs"
+  value       = var.enable_monitoring && var.alb_access_logs ? module.monitoring[0].alb_logs_bucket : null
+}

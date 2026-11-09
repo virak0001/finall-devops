@@ -115,6 +115,13 @@ make myip-set   # rewrite it, then: make apply
 `0.0.0.0/0` is rejected by a variable validation. An internet-facing Jenkins is
 a cryptominer with extra steps.
 
+## Where the state is
+
+In S3, not on a laptop: `s3://upskill-devops-tfstate-570417737010/jenkins-sonarqube/<workspace>/terraform.tfstate`
+(`terraform/backend.hcl`), with S3-native locking — two people running
+`make apply` at once cannot corrupt it; the second waits for the lock. Each
+teammate runs `make init` once.
+
 ## Which AWS account
 
 `aws_account_id` in `terraform/env/dev.tfvars` is checked on every plan.

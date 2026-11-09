@@ -32,3 +32,13 @@ output "alerts_topic_arn" {
   description = "SNS topic every platform alarm notifies"
   value       = aws_sns_topic.alerts.arn
 }
+
+output "audit_trail_bucket" {
+  description = "S3 bucket holding the CloudTrail trail, or null with enable_audit = false"
+  value       = var.enable_audit ? module.audit[0].trail_bucket : null
+}
+
+output "audit_log_group" {
+  description = "CloudWatch log group to query CloudTrail with Logs Insights, or null with enable_audit = false"
+  value       = var.enable_audit ? module.audit[0].trail_log_group : null
+}

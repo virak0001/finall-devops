@@ -164,6 +164,72 @@ module "eks" {
   tags = var.tags
 }
 
+# ─── WAF ─────────────────────────────────────────────────────────────────────
+# A web ACL for the ALB above. Terraform cannot attach it — the ALB is the
+# Load Balancer Controller's — so its ARN goes to SSM as waf_acl_arn
+# (platform.tf) and every Ingress in the ALB group names it; the controller
+# associates it. Your own IP (api_allowed_cidrs) is exempt from the rate limit
+# only, so `make load-test` is not blocked by its own WAF.
+
+module "waf" {
+  source = "./modules/waf"
+  count  = var.waf_enabled ? 1 : 0
+
+  project_name = var.project_name
+  environment  = local.environment
+
+  rate_limit              = var.waf_rate_limit
+  rate_limit_exempt_cidrs = var.api_allowed_cidrs
+
+  # Argo CD's API shares this ALB and posts whole manifests, over the common
+  # rule set's 8 KB body limit.
+  count_only_common_rules = ["SizeRestrictions_BODY"]
+
+  tags = var.tags
+}
+
+# ─── Monitoring ──────────────────────────────────────────────────────────────
+# The dashboard, the alarms and the ALB's access-log bucket for this
+# environment. Alarms go to global/'s SNS topic — one place to subscribe an
+# email for everything. Its ARN is built rather than looked up, so planning an
+# environment does not need global/ applied first.
+#
+# The ALB is named after the cluster by the cluster project's Ingresses, which
+# is how the dashboard finds its metrics; the bucket name reaches those
+# Ingresses through SSM (platform.tf, alb_logs_bucket).
+
+module "monitoring" {
+  source = "./modules/monitoring"
+  count  = var.enable_monitoring ? 1 : 0
+
+  project_name = var.project_name
+  environment  = local.environment
+  cluster_name = local.cluster_name
+  alb_name     = local.cluster_name
+
+  alarm_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${var.region}:${data.aws_caller_identity.current.account_id}:${var.project_name}-alerts"
+
+  # From outside, over DNS, TLS, the WAF and the ALB — what a user sees.
+  uptime_checks = local.dns_enabled ? {
+    site     = { fqdn = var.site_hostname, path = "/" }
+    auth-api = { fqdn = var.site_hostname, path = "/api/auth/health" }
+  } : {}
+
+  container_insights_enabled = var.enable_container_insights
+  waf_enabled                = var.waf_enabled
+  waf_web_acl_name           = var.waf_enabled ? module.waf[0].web_acl_name : ""
+
+  alb_access_logs    = var.alb_access_logs
+  log_retention_days = var.log_retention_days
+
+  cpu_alarm_threshold    = var.cpu_alarm_threshold
+  memory_alarm_threshold = var.memory_alarm_threshold
+
+  extra_alarm_arns = ["arn:${data.aws_partition.current.partition}:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.project_name}-deployment-failed"]
+
+  tags = var.tags
+}
+
 # ─── What used to live here ──────────────────────────────────────────────────
 # ECR moved to global/. These tell Terraform to forget the repositories in
 # this workspace's state WITHOUT deleting them — they still hold every image —

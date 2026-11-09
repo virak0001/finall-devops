@@ -66,6 +66,8 @@ dig +short @8.8.8.8 dev.devops-selft-learning.xyz
 
 ## Load test
 
+[cluster/loadtest/README.md](cluster/loadtest/README.md)
+
 ```bash
 cd ~/Desktop/aws-devops/dev-finall/cluster
 export KUBECONFIG=~/.kube/config-dev
@@ -80,6 +82,22 @@ export KUBECONFIG=~/.kube/config-dev
 kubectl get nodes -w
 make node-scale-test WORKSPACE=dev
 make node-scale-clean WORKSPACE=dev
+```
+
+## Monitoring, logging, auditing
+
+[terraform/docs/monitoring.md](terraform/docs/monitoring.md)
+
+```bash
+cd ~/Desktop/aws-devops/dev-finall/terraform
+echo 'alert_email = "you@example.com"' > global/terraform.tfvars
+make global-plan
+make global-apply
+```
+
+```bash
+aws cloudwatch describe-alarms --state-value ALARM --query 'MetricAlarms[].AlarmName' --output table
+aws cloudtrail lookup-events --max-results 10 --query 'Events[].[EventTime,Username,EventName]' --output table
 ```
 
 ## Down

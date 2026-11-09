@@ -89,6 +89,23 @@ module "registry" {
   tags = var.tags
 }
 
+# ─── Audit ───────────────────────────────────────────────────────────────────
+# Who did what in this AWS account: one CloudTrail trail for every region and
+# environment, kept in S3 for a year and searchable in CloudWatch for 90 days,
+# plus security alarms (root used, IAM changed, logins failed, …) to the same
+# SNS topic as the deployment alarm. Account-wide, so it lives here, not in an
+# environment — and survives `make down`.
+
+module "audit" {
+  source = "../modules/audit"
+  count  = var.enable_audit ? 1 : 0
+
+  project_name    = var.project_name
+  alarm_topic_arn = aws_sns_topic.alerts.arn
+
+  tags = var.tags
+}
+
 # ─── Adopting the repositories dev used to own ───────────────────────────────
 # Until this move, the dev workspace created these. Its `removed` blocks make
 # dev forget them without deleting them, and these pick them up here — every

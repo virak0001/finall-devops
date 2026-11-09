@@ -264,3 +264,48 @@ variable "platform_ssm_prefix" {
     error_message = "An absolute SSM path with no trailing slash, like /platform."
   }
 }
+
+# ─── WAF (module.waf in main.tf) ─────────────────────────────────────────────
+
+variable "waf_enabled" {
+  type        = bool
+  description = "Put a WAF web ACL in front of this environment's ALB (published to SSM as waf_acl_arn)"
+  default     = true
+}
+
+variable "waf_rate_limit" {
+  type        = number
+  description = "Requests one IP may send in 5 minutes before the WAF blocks it (api_allowed_cidrs are exempt)"
+  default     = 1000
+
+  validation {
+    condition     = var.waf_rate_limit >= 100 && var.waf_rate_limit <= 2000000000
+    error_message = "Between 100 and 2,000,000,000 requests per 5 minutes."
+  }
+}
+
+# ─── Monitoring (module.monitoring in main.tf) ───────────────────────────────
+
+variable "enable_monitoring" {
+  type        = bool
+  description = "Dashboard, alarms and uptime checks for this environment (modules/monitoring)"
+  default     = true
+}
+
+variable "alb_access_logs" {
+  type        = bool
+  description = "Create an S3 bucket for the ALB's access logs and have the Ingresses turn them on (published to SSM as alb_logs_bucket)"
+  default     = true
+}
+
+variable "cpu_alarm_threshold" {
+  type        = number
+  description = "Average node CPU % that alarms after 10 minutes (needs enable_container_insights)"
+  default     = 80
+}
+
+variable "memory_alarm_threshold" {
+  type        = number
+  description = "Average node memory % that alarms after 10 minutes (needs enable_container_insights)"
+  default     = 80
+}

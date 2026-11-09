@@ -43,6 +43,15 @@ locals {
       secrets_name_prefix = local.secrets_name_prefix
       secrets_role_prefix = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${local.secrets_role_prefix}"
     },
+    # The WAF web ACL (module.waf, main.tf). The cluster project annotates every Ingress
+    # in the ALB group with it, and the Load Balancer Controller attaches it.
+    var.waf_enabled ? {
+      waf_acl_arn = module.waf[0].web_acl_arn
+    } : {},
+    # The bucket the Ingresses point the ALB's access logs at (module.monitoring).
+    var.enable_monitoring && var.alb_access_logs ? {
+      alb_logs_bucket = module.monitoring[0].alb_logs_bucket
+    } : {},
     local.dns_enabled ? {
       site_url        = local.site_url
       site_hostname   = var.site_hostname

@@ -53,6 +53,12 @@ variable "tags" {
 
 variable "alert_email" {
   type        = string
-  description = "Where deployment-failure alarms are emailed. AWS sends a confirmation link first. Null: no email, the alarm still fires."
+  description = "Where every platform alarm is emailed — deployments, security, and each environment's monitoring. AWS sends a confirmation link first. Null: no email, the alarms still fire."
   default     = null
+}
+
+variable "enable_audit" {
+  type        = bool
+  description = "CloudTrail trail + security alarms for the whole account (modules/audit)"
+  default     = true
 }

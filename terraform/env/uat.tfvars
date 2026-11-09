@@ -44,7 +44,7 @@ node_disk_size      = 50
 # ─── Observability ───────────────────────────────────────────────────────────
 
 log_retention_days        = 14
-enable_container_insights = false
+enable_container_insights = true
 
 # ─── DNS and HTTPS ───────────────────────────────────────────────────────────
 

@@ -54,7 +54,7 @@ node_disk_size      = 50
 # ─── Observability ───────────────────────────────────────────────────────────
 
 log_retention_days        = 7
-enable_container_insights = false
+enable_container_insights = true
 
 # ─── DNS and HTTPS ───────────────────────────────────────────────────────────
 # The zone already exists and is delegated; Terraform only reads it. The

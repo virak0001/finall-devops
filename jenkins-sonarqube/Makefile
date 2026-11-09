@@ -51,8 +51,8 @@ up: ## Everything: instance, Docker, Jenkins and SonarQube (~6 minutes)
 	@$(MAKE) --no-print-directory deploy WORKSPACE=$(WORKSPACE)
 
 .PHONY: init
-init: ## Download providers (once, and after adding one)
-	cd $(TF_DIR) && terraform init -input=false
+init: ## Providers + the S3 state backend (once per machine, and after adding a provider)
+	cd $(TF_DIR) && terraform init -input=false -backend-config=backend.hcl
 
 .PHONY: check
 check: ## fmt + validate — no AWS calls, no credentials

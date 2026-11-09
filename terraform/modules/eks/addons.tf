@@ -85,6 +85,24 @@ resource "aws_eks_addon" "metrics_server" {
 
 # Container Insights: node, pod and container metrics, and Fluent Bit shipping
 # every container's stdout to /aws/containerinsights/<cluster>/application.
+#
+# Its log groups are created here first, with a retention. Left to the add-on,
+# Fluent Bit creates them on first write with NO expiry, and the bill for
+# stored logs grows every month for as long as the account exists.
+#
+#   application   every container's stdout/stderr
+#   dataplane     kubelet, kube-proxy, containerd
+#   host          the nodes' system logs
+#   performance   the metrics themselves (embedded metric format)
+resource "aws_cloudwatch_log_group" "container_insights" {
+  for_each = var.enable_container_insights ? toset(["application", "dataplane", "host", "performance"]) : toset([])
+
+  name              = "/aws/containerinsights/${var.cluster_name}/${each.key}"
+  retention_in_days = var.log_retention_days
+
+  tags = local.common_tags
+}
+
 resource "aws_eks_addon" "cloudwatch" {
   count = var.enable_container_insights ? 1 : 0
 
@@ -100,5 +118,5 @@ resource "aws_eks_addon" "cloudwatch" {
   resolve_conflicts_on_update = "OVERWRITE"
 
   tags       = local.common_tags
-  depends_on = [aws_eks_node_group.default]
+  depends_on = [aws_eks_node_group.default, aws_cloudwatch_log_group.container_insights]
 }

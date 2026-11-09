@@ -57,6 +57,8 @@ define team_args
 --set global.ingress.group="$$($(PLATFORM) cluster_name 2>/dev/null)" \
 --set global.ingress.host="$$($(PLATFORM) site_hostname 2>/dev/null)" \
 --set global.ingress.certificateArn="$$($(PLATFORM) certificate_arn 2>/dev/null)" \
+--set global.ingress.wafAclArn="$$($(PLATFORM) waf_acl_arn 2>/dev/null)" \
+--set global.ingress.accessLogsBucket="$$($(PLATFORM) alb_logs_bucket 2>/dev/null)" \
 --set global.ingress.url="$$($(PLATFORM) site_url 2>/dev/null)"
 endef
 
@@ -123,7 +125,7 @@ PLATFORM_KEYS := region cluster_name vpc_id ecr_image_prefix ecr_registry_url \
 
 # Present only where the workspace has a domain, or set per machine.
 PLATFORM_KEYS_OPTIONAL := site_url site_hostname certificate_arn route53_zone_id \
-                          admin_allowed_cidrs
+                          waf_acl_arn alb_logs_bucket admin_allowed_cidrs
 
 .PHONY: platform-pull
 platform-pull: ## Write platform/<ws>.env from the facts Terraform published to SSM
