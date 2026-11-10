@@ -191,8 +191,10 @@ module "waf" {
 # ─── Monitoring ──────────────────────────────────────────────────────────────
 # The dashboard, the alarms and the ALB's access-log bucket for this
 # environment. Alarms go to global/'s SNS topic — one place to subscribe an
-# email for everything. Its ARN is built rather than looked up, so planning an
-# environment does not need global/ applied first.
+# email for everything. That topic is named after global/'s project
+# (shared_project_name), not this environment's: prod's project_name differs.
+# Its ARN is built rather than looked up, so planning an environment does not
+# need global/ applied first.
 #
 # The ALB is named after the cluster by the cluster project's Ingresses, which
 # is how the dashboard finds its metrics; the bucket name reaches those
@@ -207,7 +209,7 @@ module "monitoring" {
   cluster_name = local.cluster_name
   alb_name     = local.cluster_name
 
-  alarm_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${var.region}:${data.aws_caller_identity.current.account_id}:${var.project_name}-alerts"
+  alarm_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${var.region}:${data.aws_caller_identity.current.account_id}:${var.shared_project_name}-alerts"
 
   # From outside, over DNS, TLS, the WAF and the ALB — what a user sees.
   uptime_checks = local.dns_enabled ? {
@@ -225,7 +227,7 @@ module "monitoring" {
   cpu_alarm_threshold    = var.cpu_alarm_threshold
   memory_alarm_threshold = var.memory_alarm_threshold
 
-  extra_alarm_arns = ["arn:${data.aws_partition.current.partition}:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.project_name}-deployment-failed"]
+  extra_alarm_arns = ["arn:${data.aws_partition.current.partition}:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.shared_project_name}-deployment-failed"]
 
   tags = var.tags
 }

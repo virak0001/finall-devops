@@ -18,7 +18,7 @@
 
 locals {
   ecr_registry_url = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
-  ecr_image_prefix = "${local.ecr_registry_url}/upskill-devops"
+  ecr_image_prefix = "${local.ecr_registry_url}/${var.shared_project_name}"
 
   # Inclusion is decided by variables only. Filtering on the values instead —
   # dropping empty ones — would make the key set depend on attributes unknown

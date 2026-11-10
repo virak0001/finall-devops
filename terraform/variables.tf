@@ -10,6 +10,18 @@ variable "project_name" {
   }
 }
 
+variable "shared_project_name" {
+  type        = string
+  description = <<-DESC
+    global/'s project_name — what the account-wide resources every environment
+    shares are named after: the ECR prefix (<name>/<service>), the alerts SNS
+    topic (<name>-alerts) and the deployment-failed alarm. Separate from
+    project_name because an environment may be named differently (prod is
+    group-3-devops) while those stay one set for the whole account.
+  DESC
+  default     = "upskill-devops"
+}
+
 variable "region" {
   type        = string
   description = "AWS region"
