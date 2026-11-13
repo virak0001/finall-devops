@@ -27,7 +27,7 @@ enable_flow_logs   = false
 kubernetes_version = "1.36"
 
 #   make myip-set WORKSPACE=uat   rewrite it to your current one
-api_allowed_cidrs = ["203.147.140.229/32"]
+api_allowed_cidrs = ["117.20.112.72/32"]
 
 admin_principal_arns = []
 team_access          = {}

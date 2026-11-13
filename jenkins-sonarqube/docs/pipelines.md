@@ -15,7 +15,9 @@ multibranch job auth-api / core-api / client-side
    SonarQube      analysis + quality gate                    ── fails the build
    Build          docker build, labels: revision, version, built-by, build-url
    Security scan  Trivy fs + image — fixable CRITICAL        ── fails the build
-                  report CRITICAL → LOW, ✗ = blocks; archived trivy-*.txt/.json
+   (every build)  security-report.txt in the build artifacts — Gitleaks, SonarQube
+                  (gate, issues, hotspots) and both Trivy scans in one report;
+                  a check the build never reached says "not run"
    ── develop / testing / main only ──────────────────────────────────────────
    Publish        new image → push · same commit's image already in ECR → add a name, no rebuild
    Deploy         develop and testing only — main stops after Publish

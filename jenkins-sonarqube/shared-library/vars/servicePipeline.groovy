@@ -10,6 +10,9 @@
 //   checkout → secret scan → unit tests → SonarQube + quality gate → build →
 //   security scan (dependencies + image)
 //
+//   Every build archives security-report.txt: all four scans in one report
+//   (vars/securityReport.groovy), even when the build stopped part-way.
+//
 // The three environment branches, additionally — publish, and deploy:
 //
 //   develop → dev    push to ECR → commit the tag → Argo CD → smoke test → record
@@ -116,7 +119,7 @@ def call(Map cfg) {
             // Is there an image already? Either under this environment's
             // name (a rebuild), or under an earlier environment's name for
             // this same commit — then it is only named, never rebuilt.
-            //   ALREADY_BUILT  skip the build and the image scan
+            //   ALREADY_BUILT  skip the build; the image scan pulls it from ECR
             //   REUSE_FROM     the existing name to add IMAGE_TAG to
             env.ALREADY_BUILT = 'false'
             env.REUSE_FROM = ''
@@ -218,8 +221,19 @@ def call(Map cfg) {
 
       stage('Quality gate') {
         steps {
-          timeout(time: 10, unit: 'MINUTES') {
-            waitForQualityGate abortPipeline: true
+          script {
+            // Not abortPipeline: the gate's conditions and issues are read
+            // into the security report first, then the gate fails the build.
+            def qg
+            timeout(time: 10, unit: 'MINUTES') {
+              qg = waitForQualityGate abortPipeline: false
+            }
+            securityReport.sonar(qg.status)
+            echo readFile('.platform/sonar.txt')
+            if (qg.status != 'OK') {
+              error("SonarQube quality gate ${qg.status} — the failed conditions and the issues are above, " +
+                    'and in security-report.txt in the build artifacts.')
+            }
           }
         }
       }
@@ -249,7 +263,12 @@ def call(Map cfg) {
             // Trivy, twice over the same rule:
             //   dependencies  the repo's lockfiles, dev dependencies included
             //   image         base image and OS packages, which the lockfile
-            //                 cannot see — only when this build made the image
+            //                 cannot see. The image this build made — or, on
+            //                 testing and main, where nothing is rebuilt, the
+            //                 very image in ECR this build names (uat-, prod-),
+            //                 pulled and scanned with TODAY's database: a CVE
+            //                 published since dev built it shows here, and a
+            //                 fixable one blocks the release like any other
             //
             // Each target is scanned ONCE, every severity, to JSON. The report
             // is rendered from that JSON by resources/platform/trivy-report.tpl:
@@ -272,9 +291,14 @@ def call(Map cfg) {
             String cache = '-v trivy-cache:/root/.cache/trivy'
             List scans = [[name: 'dependencies', args: 'fs --scanners vuln --skip-dirs node_modules .',
                            docker: cache]]
+            String sock = "-v /var/run/docker.sock:/var/run/docker.sock ${cache}"
             if (env.ALREADY_BUILT == 'false') {
-              scans << [name: 'image', args: 'image "$IMAGE"',
-                        docker: "-v /var/run/docker.sock:/var/run/docker.sock ${cache}"]
+              scans << [name: 'image', args: 'image "$IMAGE"', docker: sock]
+            } else if (env.IS_DEPLOY == 'true') {
+              // Its existing name: IMAGE_TAG itself is only added at Publish.
+              env.SCAN_IMAGE = platform.image(cfg.service, env.REUSE_FROM ?: env.IMAGE_TAG)
+              pullImage(env.SCAN_IMAGE)
+              scans << [name: 'image', args: 'image "$SCAN_IMAGE"', docker: sock]
             }
 
             List blocked = []
@@ -293,7 +317,7 @@ def call(Map cfg) {
 
               String report = readFile("trivy-${s.name}.txt")
               echo "══ Security scan: ${s.name} — blocks on fixable ${gate} ══\n${report}"
-              int blocking = blockingCount(report)
+              int blocking = securityReport.blocking(report)
               if (blocking < 0) { error("Trivy ${s.name} report has no 'blocking:' line — the template is broken.") }
               if (blocking > 0) { blocked << "${s.name} (${blocking})" }
             }
@@ -304,7 +328,8 @@ def call(Map cfg) {
             }
           }
         }
-        post { always { archiveArtifacts artifacts: 'trivy-*.txt, trivy-*.json', allowEmptyArchive: true } }
+        // The readable reports go into security-report.txt; the raw JSON stays.
+        post { always { archiveArtifacts artifacts: 'trivy-*.json', allowEmptyArchive: true } }
       }
 
       // A new image is pushed; an existing one only gains its name for this
@@ -349,6 +374,12 @@ def call(Map cfg) {
     }
 
     post {
+      // First of the post blocks, so it runs on every outcome: one
+      // security-report.txt with Gitleaks, SonarQube and both Trivy scans —
+      // and which of them never ran, when the build stopped early.
+      always {
+        script { securityReport.write(gate: gate, imageOrigin: env.IS_DEPLOY == 'true' ? imageOrigin() : null) }
+      }
       success {
         script {
           notifyTelegram('SUCCESS', '✅', "${cfg.service} ${env.IMAGE_TAG ?: ''}" +
@@ -376,12 +407,17 @@ def call(Map cfg) {
       // which then could not see .platform/deployment.json and wrote a
       // second, wrong BUILD_FAILED record. cleanup runs last.
       cleanup {
-        // Scoped to this build. A global prune would delete layers another
-        // job's build is still writing (see the old Jenkinsfiles' history).
+        // Scoped to this build. A plain `docker image prune` also deletes the
+        // untagged stage images (AS build, AS prod-deps) of a build another
+        // job is running right now — it then dies on
+        //   invalid from flag value build: No such image: sha256:…
+        // (auth-api develop #2, while core-api's failed build cleaned up).
+        // Only dangling images older than an hour go: every build here is
+        // timed out at 45 minutes, so none of them is still being used.
         sh '''
-          docker rmi "$IMAGE" 2>/dev/null || true
-          docker image prune -f >/dev/null 2>&1 || true
-          rm -rf node_modules coverage .scannerwork .platform .gitops trivy-*.json trivy-*.txt
+          docker rmi "$IMAGE" ${SCAN_IMAGE:+"$SCAN_IMAGE"} 2>/dev/null || true
+          docker image prune -f --filter until=1h >/dev/null 2>&1 || true
+          rm -rf node_modules coverage .scannerwork .platform .gitops trivy-*.json trivy-*.txt security-report.txt
         '''
       }
     }
@@ -393,13 +429,6 @@ def call(Map cfg) {
 @NonCPS
 String trivyList(String severities) {
   return severities.split(',').collect { "\"${it.trim().toUpperCase()}\"" }.join(' ')
-}
-
-// The template's last line is "blocking: N". -1 when it is missing.
-@NonCPS
-int blockingCount(String report) {
-  def m = report =~ /(?m)^blocking: (\d+)\s*$/
-  return m.find() ? (m.group(1) as int) : -1
 }
 
 // Where IMAGE_TAG's image came from — said wherever a person decides on prod.
@@ -421,6 +450,16 @@ void publishImage(String service) {
   sh """
     ${awsCmd()} ecr get-login-password | docker login --username AWS --password-stdin '${platform.registry()}'
     docker push "\$IMAGE"
+    docker logout '${platform.registry()}'
+  """
+}
+
+// Pulls an image already in ECR, for the image scan of a build that names it
+// rather than building it. cleanup removes it again.
+void pullImage(String ref) {
+  sh """
+    ${awsCmd()} ecr get-login-password | docker login --username AWS --password-stdin '${platform.registry()}'
+    docker pull '${ref}'
     docker logout '${platform.registry()}'
   """
 }
