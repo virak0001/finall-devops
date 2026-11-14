@@ -3,7 +3,7 @@ Create a professional, multi-page draw.io diagram of the AWS DevOps platform des
 OUTPUT RULES
 - Return one complete, valid draw.io file: <mxfile> with 3 <diagram> pages. Output XML only, in one code block, with nothing omitted.
 - Use the AWS 2024 style: mxgraph.aws4 group containers and resource icons. If you are not sure a stencil name exists, use a labelled rounded rectangle in the AWS category colour. Never guess a stencil name.
-- Category colours: compute/containers #ED7100, networking #8C4FFF, storage #7AA116, security #DD344C, management/integration #E7157B.
+- Category colours: compute/containers #ED7100, networking #8C4FFF, storage #7AA116, security #DD344C, management/integration #E7157B, database #C925D1.
 - Containers: AWS Cloud (group_aws_cloud_alt), Region (group_region), VPC (group_vpc2), public subnet (group_public_subnet), private subnet (group_private_subnet), Availability Zone as a dashed blue rectangle.
 - Children must be nested inside their containers using the parent attribute, so a container moves with its contents.
 - Use orthogonal edges with rounded corners. Avoid crossing lines, and never run a line through an icon or label.
@@ -22,7 +22,6 @@ Outside AWS:
 - End users (browser)
 - Admin/DevOps laptop (IP allowlisted)
 - GitHub (3 service repos, the GitOps "cluster" repo)
-- Neon Postgres (external managed database)
 - Telegram (notifications)
 
 Inside AWS Cloud > Region us-east-1:
@@ -37,6 +36,7 @@ Box "Shared across all environments":
 
 Box "Per environment":
 - ACM certificate (site + wildcard)
+- AWS WAF web ACL, attached to the ALB (it cannot attach to Route 53). Draw its icon inside the ALB box, in front of the ALB icon, where the user traffic arrow enters, so the picture reads: WAF first, then the ALB. Rules in order: 10 rate limit per IP, 20 IP reputation, 30 known bad inputs, 40 common rules, 50 SQL injection
 - Secrets Manager: one secret per team
 - SSM Parameter Store: /platform/<env>/*, the Terraform-to-cluster handover
 - KMS key: encrypts Kubernetes Secrets
@@ -52,6 +52,7 @@ VPC "prod" 10.0.0.0/16, 3 Availability Zones (1a, 1b, 1c):
 - Internet Gateway
 - Public subnets 10.0.1.0/24, 10.0.2.0/24, 10.0.3.0/24: one NAT Gateway in each; the shared internet-facing ALB spans all three
 - Private subnets 10.0.11.0/24, 10.0.12.0/24, 10.0.13.0/24: EKS worker nodes
+- Amazon RDS for PostgreSQL, in the private subnets below the node group, drawn as one dashed box across the three AZs (diagram design only: the Terraform code still uses an external Neon database). Read replica in 1a (read-only queries), primary in 1b (reads + writes), standby in 1c (automatic failover). Primary to read replica "async replication", primary <-> standby "sync replication". Multi-AZ, automated backups with point-in-time restore, encrypted, no public access
 - Managed node group: c7i-flex.large, AL2023, min 1 / desired 2 / max 4, encrypted gp3 50 GB, IMDSv2
 - S3 Gateway Endpoint: ECR layer pulls bypass NAT
 - VPC Flow Logs (REJECT traffic) to CloudWatch
@@ -59,9 +60,9 @@ VPC "prod" 10.0.0.0/16, 3 Availability Zones (1a, 1b, 1c):
 
 Numbered flow:
 1. User resolves the hostname in Route 53
-2. Route 53 alias to ALB :443 (:80 redirects to 443; TLS from ACM)
+2. Route 53 alias to ALB :443 (:80 redirects to 443; TLS from ACM; the WAF web ACL checks every request)
 3. ALB sends traffic directly to pod IPs in the private subnets (target-type ip, no NodePort)
-4. Pods reach Neon Postgres through NAT, then the Internet Gateway
+4. Pods reach the RDS primary on port 5432 inside the VPC; the database is never reached from the internet. Other outbound traffic still leaves through NAT (unnumbered arrow "outbound through NAT")
 
 ALB listener rules, shown as a note beside the ALB, evaluated in this order:
 - order 10: argocd.<host> to Argo CD (allowlisted source IPs only)
@@ -79,6 +80,12 @@ Table on the page, "Environment differences":
 | Container Insights | off | off | on |
 | Log retention | 7 days | 14 days | 90 days |
 | Argo CD sync | automatic | automatic | manual, by Jenkins after approval |
+
+Panel across the bottom of the page, "Database: recommended levels". Three columns, each with blue database cylinders, a green "Backup + point-in-time restore" pill under the primary, a caption and a one-line note:
+- Basic (start small): Primary + Backup. One database; if it fails, restore it from backup.
+- HA (recommended): Primary <-> Standby (Multi-AZ) + Backup, linked "sync". A standby in a second Availability Zone takes over automatically.
+- Scale (this design), highlighted border: Primary + Read Replica + Standby + Backup. Primary to read replica "async", primary <-> standby "sync". The read replica serves read traffic; the standby still covers failover.
+The panel explains the levels; the Scale level is the one drawn in the private subnets above.
 
 ━━━ PAGE 2: "CI/CD Pipeline" ━━━
 
@@ -153,10 +160,10 @@ Guardrails badge on each team namespace:
 ResourceQuota, LimitRange, RoleBinding (group team:<name>), NetworkPolicy, SecretStore + ExternalSecret, Pod Security baseline, ALB readiness gates
 
 Flows:
-- ALB to auth-api, client-side and Argo CD
+- ALB (label it "ALB + WAF": the web ACL sits on it) to auth-api, client-side and Argo CD
 - client-side to auth-api and core-api: server-side rendering over cluster DNS, allowed by NetworkPolicy allowFrom
 - core-api to auth-api: AUTH_SERVICE_URL
-- auth-api and core-api to Neon Postgres, through NAT
+- auth-api and core-api to Amazon RDS (PostgreSQL, private subnets) on port 5432, inside the VPC
 - aws-load-balancer-controller watches Ingresses, then creates and updates the ALB
 - external-dns watches Ingresses, then writes the Route 53 record
 - cluster-autoscaler resizes the node group Auto Scaling group when pods are Pending
