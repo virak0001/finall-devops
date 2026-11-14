@@ -32,7 +32,7 @@ kubernetes_version = "1.36"
 # In prod this should be an office range or a VPN egress address, not whatever
 # a laptop happens to have today.
 #   make myip-set WORKSPACE=prod
-api_allowed_cidrs = ["124.248.190.205/32"]
+api_allowed_cidrs = ["117.20.112.72/32"]
 
 admin_principal_arns = []
 team_access          = {}

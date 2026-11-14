@@ -10,6 +10,7 @@ terraform.tfstate.d/
 *.tfstate.*
 tfplan
 secrets_import.tf
+logs_import.tf
 
 # Local states that remain: bootstrap/ keeps its own here on purpose (it
 # creates the bucket the others live in), and terraform.tfstate.d/ is what

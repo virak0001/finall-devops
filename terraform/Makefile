@@ -9,6 +9,7 @@ BACKEND   := -backend-config=backend.hcl
 REGION    := $(shell sed -n 's/^[[:space:]]*region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TF_DIR)/$(VARS) 2>/dev/null | head -1)
 PROJECT   := $(shell sed -n 's/^[[:space:]]*project_name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TF_DIR)/$(VARS) 2>/dev/null | head -1)
 SECRETS_IMPORT := secrets_import.tf
+LOGS_IMPORT    := logs_import.tf
 
 define tf
 	@test -f "$(TF_DIR)/$(VARS)" || { \
@@ -46,11 +47,11 @@ migrate-state: ## Move local terraform.tfstate.d/* states into the S3 bucket (on
 	cd $(TF_DIR) && terraform init -migrate-state $(BACKEND)
 
 .PHONY: plan
-plan: secrets-restore ## Show what would change: make plan WORKSPACE=dev
+plan: secrets-restore logs-adopt ## Show what would change: make plan WORKSPACE=dev
 	$(call tf,plan -var-file=$(VARS) -out=tfplan)
 
 .PHONY: apply
-apply: secrets-restore ## Apply the plan you just reviewed (asks before changing anything)
+apply: secrets-restore logs-adopt ## Apply the plan you just reviewed (asks before changing anything)
 	$(call tf,apply -var-file=$(VARS))
 
 # A destroy leaves each secret scheduled for deletion, with its name reserved
@@ -81,6 +82,27 @@ secrets-restore: ## Restore this workspace's deleted secrets and adopt them, so 
 	    fi; \
 	  done
 
+# Fluent Bit keeps writing while a destroy runs, and on a missing log group it
+# makes one: no retention, not in state. The next apply then fails with
+# ResourceAlreadyExistsException. Adopt each such group, so the apply takes it
+# over and puts the retention back instead of failing.
+.PHONY: logs-adopt
+logs-adopt: ## Adopt Container Insights log groups a destroy left behind
+	@cd $(TF_DIR) && terraform workspace select -or-create $(WORKSPACE) >/dev/null
+	@cd $(TF_DIR) && rm -f $(LOGS_IMPORT) && \
+	  managed="$$(terraform state list 2>/dev/null || true)" && \
+	  prefix="/aws/containerinsights/$(PROJECT)-$(WORKSPACE)/" && \
+	  aws logs describe-log-groups --region $(REGION) --log-group-name-prefix "$$prefix" \
+	    --query 'logGroups[].logGroupName' --output text | tr '\t' '\n' | \
+	  while read -r name; do \
+	    [[ -n "$$name" && "$$name" != "None" ]] || continue; \
+	    address="module.eks.aws_cloudwatch_log_group.container_insights[\"$${name#"$$prefix"}\"]"; \
+	    if ! grep -qxF "$$address" <<<"$$managed"; then \
+	      echo "adopting $$name"; \
+	      printf 'import {\n  to = %s\n  id = "%s"\n}\n' "$$address" "$$name" >> $(LOGS_IMPORT); \
+	    fi; \
+	  done
+
 .PHONY: apply-plan
 apply-plan: ## Apply exactly the saved tfplan from `make plan` — no second prompt, no drift
 	$(call tf,apply tfplan)
@@ -102,7 +124,7 @@ destroy: ## Tear the workspace down — VPC, cluster, nodes. ECR is global/'s an
 	@echo
 	@read -p "Type the workspace name to confirm: " c; \
 	  if [[ "$$c" != "$(WORKSPACE)" ]]; then echo "aborted"; exit 1; fi
-	@rm -f $(TF_DIR)/$(SECRETS_IMPORT)
+	@rm -f $(TF_DIR)/$(SECRETS_IMPORT) $(TF_DIR)/$(LOGS_IMPORT)
 	$(call tf,destroy -var-file=$(VARS))
 
 .PHONY: output
